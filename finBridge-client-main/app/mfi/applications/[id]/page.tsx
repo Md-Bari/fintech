@@ -42,7 +42,10 @@ interface ApplicationDetails {
     amount: string;
     duration_months: number;
     purpose: string;
-    status: "pending" | "approved" | "rejected";
+    description?: string | null;
+    fraud_score?: number | null;
+    fraud_reason?: string | null;
+    status: "pending" | "approved" | "rejected" | "under_review" | "fraud_rejected" | string;
     created_at: string;
   };
   documents: Document[];
@@ -52,6 +55,8 @@ const STATUS_CONFIG = {
   pending: { label: "Pending", className: "text-amber-600 bg-amber-50 border-amber-200", icon: Clock },
   approved: { label: "Approved", className: "text-emerald-600 bg-emerald-50 border-emerald-200", icon: CheckCircle2 },
   rejected: { label: "Rejected", className: "text-destructive bg-destructive/5 border-destructive/20", icon: XCircle },
+  under_review: { label: "Under Review", className: "text-blue-600 bg-blue-50 border-blue-200", icon: Clock },
+  fraud_rejected: { label: "Fraud Rejected", className: "text-rose-700 bg-rose-50 border-rose-200", icon: XCircle },
 } as const;
 
 function initials(name: string) {
@@ -64,6 +69,16 @@ function formatDate(dateStr: string) {
 
 function formatAmount(amount: string) {
   return Number(amount).toLocaleString("en-BD");
+}
+
+function getFraudReasonText(application: ApplicationDetails["application"]) {
+  if (application.fraud_reason && application.fraud_reason.trim().length > 0) return application.fraud_reason;
+  if (application.fraud_score !== null && application.fraud_score !== undefined) {
+    const scorePct = Math.round(Number(application.fraud_score) * 100);
+    if (scorePct >= 40) return "AI fraud review pending. Please refresh in a few seconds.";
+    return `Fraud risk is ${scorePct}%, below the 40% threshold for detailed AI review.`;
+  }
+  return "Fraud analysis is not available for this application yet.";
 }
 
 export default function ApplicationDetailsPage({ params }: { params: Promise<{ id: string }> }) {
@@ -249,7 +264,15 @@ export default function ApplicationDetailsPage({ params }: { params: Promise<{ i
                   </div>
                   
                   {(() => {
-                    const status = STATUS_CONFIG[details.application.status];
+                    const status =
+                      STATUS_CONFIG[details.application.status as keyof typeof STATUS_CONFIG] ??
+                      {
+                        label: String(details.application.status || "Unknown")
+                          .replace(/_/g, " ")
+                          .replace(/\b\w/g, (c) => c.toUpperCase()),
+                        className: "text-slate-600 bg-slate-50 border-slate-200",
+                        icon: Clock,
+                      };
                     const StatusIcon = status.icon;
                     return (
                       <div className={cn("inline-flex items-center gap-2 px-4 py-2 rounded-full border font-bold uppercase tracking-wider text-xs", status.className)}>
@@ -277,12 +300,41 @@ export default function ApplicationDetailsPage({ params }: { params: Promise<{ i
                     <p className="text-sm text-muted-foreground flex items-center gap-1.5"><Calendar size={14} /> Duration</p>
                     <p className="font-bold text-lg">{details.application.duration_months} Months</p>
                   </div>
+                  <div className="space-y-1 sm:col-span-2">
+                    <p className="text-sm text-muted-foreground flex items-center gap-1.5"><FileText size={14} /> Fraud Probability</p>
+                    <p className="font-bold text-lg">
+                      {details.application.fraud_score !== null && details.application.fraud_score !== undefined
+                        ? `${Math.round(Number(details.application.fraud_score) * 100)}%`
+                        : "N/A"}
+                    </p>
+                  </div>
                 </div>
 
                 <div className="pt-6 border-t border-border/50 space-y-2">
                   <p className="text-sm text-muted-foreground flex items-center gap-1.5"><FileText size={14} /> Stated Purpose</p>
                   <p className="text-foreground leading-relaxed bg-muted/30 p-4 rounded-xl border border-border/50">
                     {details.application.purpose || "No purpose stated."}
+                  </p>
+                </div>
+                <div className="space-y-2">
+                  <p className="text-sm text-muted-foreground flex items-center gap-1.5"><FileText size={14} /> Description</p>
+                  <p className="text-foreground leading-relaxed bg-muted/30 p-4 rounded-xl border border-border/50">
+                    {details.application.description || "No description provided."}
+                  </p>
+                </div>
+                <div className="space-y-2">
+                  <p className="text-sm text-rose-700 font-semibold flex items-center gap-1.5"><FileText size={14} /> Fraud Analysis</p>
+                  <p
+                    className={cn(
+                      "leading-relaxed p-4 rounded-xl border text-sm",
+                      details.application.fraud_score !== null &&
+                        details.application.fraud_score !== undefined &&
+                        Number(details.application.fraud_score) >= 0.4
+                        ? "text-rose-900 bg-rose-50 border-rose-200"
+                        : "text-slate-700 bg-slate-50 border-slate-200",
+                    )}
+                  >
+                    {getFraudReasonText(details.application)}
                   </p>
                 </div>
               </CardContent>

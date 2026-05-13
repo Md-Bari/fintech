@@ -9,6 +9,7 @@ use App\Mail\LoanApproved;
 use App\Mail\LoanRejected;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Mail;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
@@ -16,6 +17,142 @@ use Cloudinary\Cloudinary;
 
 class LoanApplicationController extends Controller
 {
+    private function fetchGeminiReview(array $payload, float $fraudRate): ?string
+    {
+        if ($fraudRate < 40.0) {
+            return null;
+        }
+
+        $url = env('FRAUD_API_EXPLAIN_URL', 'http://loan-fraud-api:8000/explain');
+
+        try {
+            $response = Http::timeout(6)->post($url, [
+                'fraud_rate' => round($fraudRate, 2),
+                'amount' => (float) ($payload['amount'] ?? 0),
+                'duration_months' => (int) ($payload['duration_months'] ?? 0),
+                'purpose' => (string) ($payload['purpose'] ?? ''),
+                'description' => (string) ($payload['description'] ?? ''),
+                'product_name' => (string) ($payload['product_name'] ?? ''),
+            ]);
+
+            if (!$response->ok()) {
+                return null;
+            }
+
+            $review = $response->json('fraud_reason');
+            return (is_string($review) && trim($review) !== '') ? trim($review) : null;
+        } catch (\Throwable $e) {
+            return null;
+        }
+    }
+
+    private function persistRejectedLoanReview(string $applicationId, float $fraudRate, string $reviewReport, array $analysisPayload): void
+    {
+        $exists = DB::table('rejected_loan_application')
+            ->where('loan_application_id', $applicationId)
+            ->exists();
+
+        if ($exists) {
+            DB::table('rejected_loan_application')
+                ->where('loan_application_id', $applicationId)
+                ->update([
+                    'fraud_rate' => round($fraudRate, 2),
+                    'review_report' => $reviewReport,
+                    'analysis_payload' => json_encode($analysisPayload),
+                    'review_source' => 'gemini',
+                    'updated_at' => now(),
+                ]);
+            return;
+        }
+
+        DB::table('rejected_loan_application')->insert([
+            'id' => (string) Str::uuid(),
+            'loan_application_id' => $applicationId,
+            'fraud_rate' => round($fraudRate, 2),
+            'review_report' => $reviewReport,
+            'analysis_payload' => json_encode($analysisPayload),
+            'review_source' => 'gemini',
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
+    }
+
+    private function hydrateFraudReviewFromReport(object $application): void
+    {
+        $fraudScoreRaw = $application->fraud_score ?? null;
+        if (!is_numeric($fraudScoreRaw)) {
+            return;
+        }
+
+        $fraudScore = (float) $fraudScoreRaw;
+        $fraudRate = $fraudScore <= 1.0 ? $fraudScore * 100.0 : $fraudScore;
+
+        if ($fraudRate < 40.0) {
+            return;
+        }
+
+        $existingReport = DB::table('rejected_loan_application')
+            ->where('loan_application_id', $application->id)
+            ->first();
+
+        if ($existingReport && !empty($existingReport->review_report)) {
+            $application->fraud_reason = $existingReport->review_report;
+            return;
+        }
+
+        $payload = [
+            'amount' => $application->amount ?? 0,
+            'duration_months' => $application->duration_months ?? 0,
+            'purpose' => $application->purpose ?? '',
+            'description' => $application->description ?? '',
+            'product_name' => $application->product_name ?? '',
+        ];
+
+        $review = $this->fetchGeminiReview($payload, $fraudRate);
+        if (!$review) {
+            return;
+        }
+
+        $this->persistRejectedLoanReview((string) $application->id, $fraudRate, $review, $payload);
+        $application->fraud_reason = $review;
+    }
+
+    private function predictFraudScore(array $payload): array
+    {
+        $url = env('FRAUD_API_URL', 'http://loan-fraud-api:8000/predict');
+
+        try {
+            $response = Http::timeout(3)->post($url, $payload);
+            if (!$response->ok()) {
+                return ['score' => null, 'reason' => null];
+            }
+
+            $data = $response->json();
+            $score = $data['fraud_probability']
+                ?? $data['fraud_score']
+                ?? $data['fraud_rate']
+                ?? $data['probability']
+                ?? $data['score']
+                ?? null;
+
+            if (!is_numeric($score)) {
+                return ['score' => null, 'reason' => null];
+            }
+
+            $score = (float) $score;
+            if ($score > 1.0 && $score <= 100.0) {
+                $score = $score / 100.0;
+            }
+
+            return [
+                'score' => max(0.0, min(1.0, $score)),
+                'reason' => $data['fraud_reason'] ?? null,
+            ];
+        } catch (\Throwable $e) {
+            return ['score' => null, 'reason' => null];
+        }
+    }
+
     private function storeApplicationDocument(Request $request, string $field): string
     {
         $storeLocally = function () use ($request, $field): string {
@@ -78,6 +215,15 @@ class LoanApplicationController extends Controller
             'loan_product_id' => 'required|uuid',
             'amount' => 'required|numeric|min:1',
             'duration_months' => 'required|integer|min:1',
+            'description' => 'nullable|string',
+            'age' => 'nullable|integer|min:18|max:90',
+            'income' => 'nullable|numeric|min:0',
+            'credit_score' => 'nullable|integer|min:300|max:900',
+            'employment_status' => 'nullable|string',
+            'marital_status' => 'nullable|string',
+            'education' => 'nullable|string',
+            'property_area' => 'nullable|string',
+            'dependents' => 'nullable|integer|min:0|max:20',
             'nid' => 'required|file|mimes:jpg,jpeg,png,pdf|max:2048',
             'tax' => 'nullable|file|mimes:jpg,jpeg,png,pdf|max:2048',
             'tin' => 'nullable|file|mimes:jpg,jpeg,png,pdf|max:2048',
@@ -132,6 +278,34 @@ class LoanApplicationController extends Controller
         }
 
         $applicationId = Str::uuid();
+        $prediction = $this->predictFraudScore([
+            'loan_amount' => (float) $request->amount,
+            'loan_term' => (int) $request->duration_months,
+            'purpose' => (string) ($request->purpose ?? ''),
+            'description' => (string) ($request->description ?? ''),
+            'age' => (int) ($request->age ?? 30),
+            'income' => (float) ($request->income ?? 25000),
+            'credit_score' => (int) ($request->credit_score ?? 650),
+            'employment_status' => (string) ($request->employment_status ?? 'Self-employed'),
+            'marital_status' => (string) ($request->marital_status ?? 'Married'),
+            'education' => (string) ($request->education ?? 'Secondary'),
+            'property_area' => (string) ($request->property_area ?? 'Urban'),
+            'dependents' => (int) ($request->dependents ?? 0),
+        ]);
+        $fraudScore = $prediction['score'];
+        $fraudReason = $prediction['reason'];
+        $isFraud = $fraudScore !== null && $fraudScore >= 0.7;
+        $fraudRate = $fraudScore !== null ? ($fraudScore <= 1.0 ? $fraudScore * 100.0 : $fraudScore) : null;
+
+        if (($fraudRate !== null && $fraudRate >= 40.0) && (empty($fraudReason) || !is_string($fraudReason))) {
+            $fraudReason = $this->fetchGeminiReview([
+                'amount' => (float) $request->amount,
+                'duration_months' => (int) $request->duration_months,
+                'purpose' => (string) ($request->purpose ?? ''),
+                'description' => (string) ($request->description ?? ''),
+                'product_name' => (string) ($product->name ?? ''),
+            ], (float) $fraudRate);
+        }
 
         DB::beginTransaction();
 
@@ -145,10 +319,29 @@ class LoanApplicationController extends Controller
                 'amount' => $request->amount,
                 'duration_months' => $request->duration_months,
                 'purpose' => $request->purpose,
+                'description' => $request->description ?? null,
                 'status' => 'pending',
+                'is_fraud' => $isFraud,
+                'fraud_score' => $fraudScore,
+                'fraud_reason' => $fraudReason,
                 'created_at' => now(),
                 'updated_at' => now(),
             ]);
+
+            if ($fraudRate !== null && $fraudRate >= 40.0 && !empty($fraudReason)) {
+                $this->persistRejectedLoanReview(
+                    (string) $applicationId,
+                    (float) $fraudRate,
+                    (string) $fraudReason,
+                    [
+                        'amount' => (float) $request->amount,
+                        'duration_months' => (int) $request->duration_months,
+                        'purpose' => (string) ($request->purpose ?? ''),
+                        'description' => (string) ($request->description ?? ''),
+                        'product_name' => (string) ($product->name ?? ''),
+                    ]
+                );
+            }
 
             // NID (required)
 
@@ -234,12 +427,10 @@ class LoanApplicationController extends Controller
             ], 500);
         }
     }
-
     public function mfiApplications(Request $request)
     {
         $user = $request->user();
 
-        // ensure MFI admin
         if ($user->role !== 'mfi_admin' || !$user->mfi_id) {
             return response()->json([
                 'success' => false,
@@ -247,19 +438,37 @@ class LoanApplicationController extends Controller
             ], 403);
         }
 
-        $query = DB::table('loan_applications')
+        $all = filter_var($request->query('all', false), FILTER_VALIDATE_BOOLEAN);
+        $hydrateAi = filter_var($request->query('hydrate_ai', true), FILTER_VALIDATE_BOOLEAN);
+        $limit = (int) $request->query('limit', 10);
+        if ($limit <= 0) {
+            $limit = 10;
+        }
+        if ($all) {
+            $limit = 50000;
+        } elseif ($limit > 100) {
+            $limit = 100;
+        }
+
+        $baseQuery = DB::table('loan_applications')
             ->join('users', 'loan_applications.user_id', '=', 'users.id')
             ->join('loan_products', 'loan_applications.loan_product_id', '=', 'loan_products.id')
             ->where('loan_applications.mfi_id', $user->mfi_id);
 
-        // ✅ FILTER: status
-        if ($request->has('status')) {
-            $query->where('loan_applications.status', $request->status);
+        if ($request->has('search')) {
+            $baseQuery->where('users.name', 'like', '%' . $request->search . '%');
         }
 
-        // ✅ SEARCH: applicant name
-        if ($request->has('search')) {
-            $query->where('users.name', 'like', '%' . $request->search . '%');
+        $stats = [
+            'total' => (clone $baseQuery)->count('loan_applications.id'),
+            'pending' => (clone $baseQuery)->where('loan_applications.status', 'pending')->count('loan_applications.id'),
+            'approved' => (clone $baseQuery)->where('loan_applications.status', 'approved')->count('loan_applications.id'),
+            'rejected' => (clone $baseQuery)->where('loan_applications.status', 'rejected')->count('loan_applications.id'),
+        ];
+
+        $query = clone $baseQuery;
+        if ($request->has('status')) {
+            $query->where('loan_applications.status', $request->status);
         }
 
         $applications = $query
@@ -271,18 +480,32 @@ class LoanApplicationController extends Controller
                 'loan_applications.amount',
                 'loan_applications.duration_months',
                 'loan_applications.status',
+                'loan_applications.description',
+                'loan_applications.fraud_score',
+                'loan_applications.fraud_reason',
                 'loan_applications.created_at'
             )
             ->orderByDesc('loan_applications.created_at')
+            ->limit($limit)
             ->get();
+        
+        if ($hydrateAi) {
+            foreach ($applications as $application) {
+                $this->hydrateFraudReviewFromReport($application);
+            }
+        }
 
         return response()->json([
             'success' => true,
             'message' => 'MFI applications fetched',
+            'meta' => [
+                'limit' => $limit,
+                'returned' => $applications->count(),
+                'stats' => $stats,
+            ],
             'data' => $applications
         ]);
     }
-
     public function show(Request $request, $id)
     {
         try {
@@ -314,6 +537,9 @@ class LoanApplicationController extends Controller
                 'loan_applications.amount',
                 'loan_applications.duration_months',
                 'loan_applications.purpose',
+                'loan_applications.description',
+                'loan_applications.fraud_score',
+                'loan_applications.fraud_reason',
                 'loan_applications.status',
                 'loan_applications.created_at'
             )->first();
@@ -325,6 +551,8 @@ class LoanApplicationController extends Controller
                     'data' => null
                 ], 404);
             }
+            
+            $this->hydrateFraudReviewFromReport($application);
 
             // documents 
             $documentsRaw = DB::table('application_documents')
@@ -596,26 +824,126 @@ class LoanApplicationController extends Controller
             'data' => $applications
         ]);
     }
-
-    public function adminAll()
+    public function adminAll(Request $request)
     {
-        $applications = DB::table('loan_applications')
+        $all = filter_var($request->query('all', false), FILTER_VALIDATE_BOOLEAN);
+        $hydrateAi = filter_var($request->query('hydrate_ai', true), FILTER_VALIDATE_BOOLEAN);
+        $limit = (int) $request->query('limit', 10);
+        if ($limit <= 0) {
+            $limit = 10;
+        }
+        if ($all) {
+            $limit = 50000;
+        } elseif ($limit > 100) {
+            $limit = 100;
+        }
+
+        $baseQuery = DB::table('loan_applications')
             ->join('users', 'loan_applications.user_id', '=', 'users.id')
-            ->join('mfi_institutions', 'loan_applications.mfi_id', '=', 'mfi_institutions.id')
+            ->join('mfi_institutions', 'loan_applications.mfi_id', '=', 'mfi_institutions.id');
+
+        $stats = [
+            'total' => (clone $baseQuery)->count('loan_applications.id'),
+            'pending' => (clone $baseQuery)->where('loan_applications.status', 'pending')->count('loan_applications.id'),
+            'approved' => (clone $baseQuery)->where('loan_applications.status', 'approved')->count('loan_applications.id'),
+            'rejected' => (clone $baseQuery)->where('loan_applications.status', 'rejected')->count('loan_applications.id'),
+        ];
+
+        $applications = (clone $baseQuery)
             ->select(
                 'loan_applications.id',
                 'loan_applications.amount',
                 'loan_applications.status',
+                'loan_applications.fraud_score',
+                'loan_applications.fraud_reason',
                 'loan_applications.created_at',
                 'users.name as borrower_name',
                 'mfi_institutions.name as mfi_name'
             )
             ->orderByDesc('loan_applications.created_at')
+            ->limit($limit)
+            ->get();
+        
+        if ($hydrateAi) {
+            foreach ($applications as $application) {
+                $this->hydrateFraudReviewFromReport($application);
+            }
+        }
+
+        return response()->json([
+            'success' => true,
+            'meta' => [
+                'limit' => $limit,
+                'returned' => $applications->count(),
+                'stats' => $stats,
+            ],
+            'data' => $applications
+        ]);
+    }
+
+    public function adminInsights(Request $request)
+    {
+        $threshold = 40.0;
+        $fraudExpr = "(CASE WHEN loan_applications.fraud_score <= 1 THEN loan_applications.fraud_score * 100 ELSE loan_applications.fraud_score END)";
+
+        $summary = DB::table('loan_applications')
+            ->selectRaw('COUNT(*) as total_applications')
+            ->selectRaw("SUM(CASE WHEN {$fraudExpr} >= ? THEN 1 ELSE 0 END) as fraud_applications", [$threshold])
+            ->selectRaw("AVG(COALESCE({$fraudExpr}, 0)) as avg_fraud_score")
+            ->first();
+
+        $mfiFraudRates = DB::table('loan_applications')
+            ->join('mfi_institutions', 'loan_applications.mfi_id', '=', 'mfi_institutions.id')
+            ->select('mfi_institutions.name as mfi_name')
+            ->selectRaw('COUNT(*) as total_applications')
+            ->selectRaw("SUM(CASE WHEN {$fraudExpr} >= ? THEN 1 ELSE 0 END) as fraud_applications", [$threshold])
+            ->selectRaw("ROUND((SUM(CASE WHEN {$fraudExpr} >= {$threshold} THEN 1 ELSE 0 END)::numeric / NULLIF(COUNT(*), 0)) * 100, 2) as fraud_rate")
+            ->groupBy('mfi_institutions.name')
+            ->orderByDesc('fraud_rate')
+            ->limit(12)
+            ->get();
+
+        $dailyFraudTrend = DB::table('loan_applications')
+            ->selectRaw("DATE(loan_applications.created_at) as day")
+            ->selectRaw("SUM(CASE WHEN {$fraudExpr} >= ? THEN 1 ELSE 0 END) as fraud_applications", [$threshold])
+            ->selectRaw('COUNT(*) as total_applications')
+            ->where('loan_applications.created_at', '>=', now()->subDays(30))
+            ->groupByRaw('DATE(loan_applications.created_at)')
+            ->orderBy('day')
+            ->get();
+
+        $fraudByPurpose = DB::table('loan_applications')
+            ->selectRaw("COALESCE(NULLIF(TRIM(loan_applications.purpose), ''), 'Unknown') as purpose")
+            ->selectRaw('COUNT(*) as total_applications')
+            ->selectRaw("SUM(CASE WHEN {$fraudExpr} >= ? THEN 1 ELSE 0 END) as fraud_applications", [$threshold])
+            ->whereRaw("{$fraudExpr} >= ?", [$threshold])
+            ->groupByRaw("COALESCE(NULLIF(TRIM(loan_applications.purpose), ''), 'Unknown')")
+            ->orderByDesc('fraud_applications')
+            ->limit(10)
+            ->get();
+
+        $statusBreakdown = DB::table('loan_applications')
+            ->select('status')
+            ->selectRaw('COUNT(*) as count')
+            ->selectRaw("ROUND(AVG(COALESCE({$fraudExpr}, 0)), 2) as avg_fraud_score")
+            ->groupBy('status')
+            ->orderByDesc('count')
             ->get();
 
         return response()->json([
             'success' => true,
-            'data' => $applications
+            'data' => [
+                'threshold' => $threshold,
+                'summary' => [
+                    'total_applications' => (int) ($summary->total_applications ?? 0),
+                    'fraud_applications' => (int) ($summary->fraud_applications ?? 0),
+                    'avg_fraud_score' => round((float) ($summary->avg_fraud_score ?? 0), 2),
+                ],
+                'fraud_rate_by_mfi' => $mfiFraudRates,
+                'daily_fraud_trend' => $dailyFraudTrend,
+                'fraud_by_purpose' => $fraudByPurpose,
+                'status_breakdown' => $statusBreakdown,
+            ],
         ]);
     }
 }

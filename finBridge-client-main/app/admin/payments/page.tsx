@@ -21,7 +21,7 @@ interface Payment {
   owner_email?: string | null;
 }
 
-const MAX_PAYMENTS = 500;
+const MAX_DISPLAY_PAYMENTS = 10;
 const MAX_CHART_POINTS = 120;
 
 export default function AdminPaymentsPage() {
@@ -51,7 +51,7 @@ export default function AdminPaymentsPage() {
     try {
       const res = await api.get("/admin/payments", {
         params: {
-          limit: MAX_PAYMENTS,
+          all: 1,
           search: searchValue || undefined,
         },
         timeout: 15000,
@@ -84,12 +84,12 @@ export default function AdminPaymentsPage() {
     const sorted = [...payments].sort(
       (a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime()
     );
-    return sorted.slice(0, MAX_PAYMENTS);
+    return sorted.slice(0, MAX_DISPLAY_PAYMENTS);
   }, [payments]);
 
-  const successfulPayments = useMemo(() => visiblePayments.filter((p) => p.status === "success"), [visiblePayments]);
-  const pendingPayments = useMemo(() => visiblePayments.filter((p) => p.status === "pending"), [visiblePayments]);
-  const failedPayments = useMemo(() => visiblePayments.filter((p) => p.status === "failed"), [visiblePayments]);
+  const successfulPayments = useMemo(() => payments.filter((p) => p.status === "success"), [payments]);
+  const pendingPayments = useMemo(() => payments.filter((p) => p.status === "pending"), [payments]);
+  const failedPayments = useMemo(() => payments.filter((p) => p.status === "failed"), [payments]);
   const totalRevenue = useMemo(
     () => successfulPayments.reduce((acc, curr) => acc + Number(curr.amount || 0), 0),
     [successfulPayments]
@@ -101,7 +101,7 @@ export default function AdminPaymentsPage() {
     { name: "Failed", value: failedPayments.length, color: "#ef4444" },
   ].filter((d) => d.value > 0);
 
-  const areaData = [...visiblePayments]
+  const areaData = [...payments]
     .slice(0, MAX_CHART_POINTS)
     .reverse()
     .map((p) => ({
@@ -158,7 +158,7 @@ export default function AdminPaymentsPage() {
               Clear
             </button>
           </form>
-          <p className="text-xs text-muted-foreground mt-2">Showing latest {MAX_PAYMENTS} transactions{search ? ` for "${search}"` : ""}.</p>
+          <p className="text-xs text-muted-foreground mt-2">Showing latest {MAX_DISPLAY_PAYMENTS} transactions{search ? ` for "${search}"` : ""}. Insights are calculated from all matched transactions.</p>
           {refreshing ? <p className="text-xs text-muted-foreground mt-1">Refreshing data...</p> : null}
         </CardContent>
       </Card>
@@ -203,7 +203,7 @@ export default function AdminPaymentsPage() {
                 <CardTitle className="text-sm font-bold text-muted-foreground uppercase tracking-wider">Total Transactions</CardTitle>
               </CardHeader>
               <CardContent>
-                <p className="text-3xl font-extrabold">{visiblePayments.length.toLocaleString()}</p>
+                <p className="text-3xl font-extrabold">{payments.length.toLocaleString()}</p>
               </CardContent>
             </Card>
             <Card className="rounded-2xl border-none shadow-sm">
@@ -253,6 +253,7 @@ export default function AdminPaymentsPage() {
                     <YAxis tick={{ fontSize: 12, fill: "#64748b" }} axisLine={false} tickLine={false} tickFormatter={(val) => `?${val}`} />
                     <Tooltip
                       contentStyle={{ borderRadius: "12px", border: "none", boxShadow: "0 4px 6px -1px rgb(0 0 0 / 0.1)" }}
+                      formatter={(value) => [`?${Number(value ?? 0).toLocaleString()}`, "Revenue"]}
                     />
                     <Area type="monotone" dataKey="amount" stroke="#10b981" strokeWidth={3} fillOpacity={1} fill="url(#colorAmountAdmin)" />
                   </AreaChart>

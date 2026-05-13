@@ -26,9 +26,9 @@ Route::prefix('v1')->group(function () {
     Route::get('/subscription-plans/{id}', [SubscriptionController::class, 'showPlan']);
 
     // ✅ SSL PAYMENT CALLBACKS (PUBLIC — NO AUTH)
-    Route::post('/payment/success', [SubscriptionController::class, 'paymentSuccess']);
-    Route::post('/payment/fail', [SubscriptionController::class, 'paymentFail']);
-    Route::post('/payment/cancel', [SubscriptionController::class, 'paymentCancel']);
+    Route::match(['get', 'post'], '/payment/success', [SubscriptionController::class, 'paymentSuccess']);
+    Route::match(['get', 'post'], '/payment/fail', [SubscriptionController::class, 'paymentFail']);
+    Route::match(['get', 'post'], '/payment/cancel', [SubscriptionController::class, 'paymentCancel']);
 
 
 
@@ -111,10 +111,12 @@ Route::prefix('v1')->group(function () {
         Route::get('/admin/mfis', [MfiController::class, 'adminList']);
 
         Route::get('/admin/reports/revenue', [AdminController::class, 'revenueReport']);
+        Route::get('/admin/ai-center-insights', [AdminController::class, 'aiCenterInsights']);
 
         Route::get('/admin/payments', [SubscriptionController::class, 'adminPayments']);
 
         Route::get('/admin/applications', [LoanApplicationController::class, 'adminAll']);
+        Route::get('/admin/application-insights', [LoanApplicationController::class, 'adminInsights']);
 
         Route::patch('/admin/subscriptions/{id}/force', [SubscriptionController::class, 'forceActivate']);
     });

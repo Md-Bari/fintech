@@ -24,21 +24,42 @@ interface Product {
   status: string;
 }
 
+interface SubscriptionData {
+  plan_name?: string;
+  status?: string;
+  features?: {
+    analytics_dashboard?: boolean;
+  };
+}
+
+interface ApplicationStats {
+  total: number;
+  pending: number;
+  approved: number;
+  rejected: number;
+}
+
 function initials(name: string) {
   return name.split(" ").map((n) => n[0]).join("").toUpperCase().slice(0, 2);
 }
 
 export default function MFIDashboard() {
   const [applications, setApplications] = useState<Application[]>([]);
+  const [appStats, setAppStats] = useState<ApplicationStats>({
+    total: 0,
+    pending: 0,
+    approved: 0,
+    rejected: 0,
+  });
   const [products, setProducts] = useState<Product[]>([]);
-  const [subscriptionPlan, setSubscriptionPlan] = useState<string>("trial");
+  const [canViewAnalytics, setCanViewAnalytics] = useState(false);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
     const fetchData = async () => {
       try {
         const [appRes, prodRes, subRes] = await Promise.all([
-          api.get("/mfi/applications").catch(() => null),
+          api.get("/mfi/applications?limit=10").catch(() => null),
           api.get("/mfi/loan-products").catch(() => null),
           api.get("/mfi/subscription").catch(() => null) // Catch safely in case it fails
         ]);
@@ -48,10 +69,24 @@ export default function MFIDashboard() {
         );
 
         setApplications(apps);
+        setAppStats(
+          appRes?.data?.meta?.stats ?? {
+            total: apps.length,
+            pending: apps.filter((a: Application) => a.status === "pending").length,
+            approved: apps.filter((a: Application) => a.status === "approved").length,
+            rejected: apps.filter((a: Application) => a.status === "rejected").length,
+          },
+        );
         setProducts(prodRes?.data?.data || []);
         
-        if (subRes && subRes.data?.data?.plan_name) {
-          setSubscriptionPlan(subRes.data.data.plan_name.toLowerCase());
+        const subscription: SubscriptionData | undefined = subRes?.data?.data;
+        if (subscription) {
+          const hasFeature = subscription.features?.analytics_dashboard === true;
+          const isPaidActive =
+            String(subscription.status || "").toLowerCase() === "active" &&
+            String(subscription.plan_name || "").toLowerCase() !== "trial";
+
+          setCanViewAnalytics(hasFeature || isPaidActive);
         }
       } catch (err) {
         console.error("Failed to fetch dashboard data:", err);
@@ -63,14 +98,14 @@ export default function MFIDashboard() {
     fetchData();
   }, []);
 
-  const totalApplicants = applications.length;
-  const pendingReview = applications.filter(a => a.status === "pending").length;
-  const approved = applications.filter(a => a.status === "approved").length;
-  const rejected = applications.filter(a => a.status === "rejected").length;
+  const totalApplicants = appStats.total;
+  const pendingReview = appStats.pending;
+  const approved = appStats.approved;
+  const rejected = appStats.rejected;
   const activeProducts = products.filter(p => p.status === "active").length;
   const disbursalRate = totalApplicants > 0 ? Math.round((approved / totalApplicants) * 100) : 0;
 
-  const recentApps = applications.slice(0, 5);
+  const recentApps = applications.slice(0, 10);
 
   // Chart Data Preparation
   const pieData = [
@@ -169,7 +204,7 @@ export default function MFIDashboard() {
                 <CardTitle className="text-xl font-extrabold tracking-tight">Application Status Distribution</CardTitle>
               </CardHeader>
               <CardContent className="h-[300px]">
-                {subscriptionPlan !== "pro" ? (
+                {!canViewAnalytics ? (
                   <div className="absolute inset-0 z-10 backdrop-blur-md bg-background/50 flex flex-col items-center justify-center p-6 text-center border border-primary/20 rounded-[2rem]">
                     <div className="w-16 h-16 rounded-full bg-primary/10 text-primary flex items-center justify-center mb-4">
                       <Lock size={28} />
@@ -200,7 +235,7 @@ export default function MFIDashboard() {
                 <CardTitle className="text-xl font-extrabold tracking-tight">Application Volume Analysis</CardTitle>
               </CardHeader>
               <CardContent className="h-[300px]">
-                {subscriptionPlan !== "pro" ? (
+                {!canViewAnalytics ? (
                   <div className="absolute inset-0 z-10 backdrop-blur-md bg-background/50 flex flex-col items-center justify-center p-6 text-center border border-primary/20 rounded-[2rem]">
                     <div className="w-16 h-16 rounded-full bg-primary/10 text-primary flex items-center justify-center mb-4">
                       <Lock size={28} />

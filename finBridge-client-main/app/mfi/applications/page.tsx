@@ -32,8 +32,18 @@ interface Application {
   product_name: string;
   amount: string;
   duration_months: number;
-  status: "pending" | "approved" | "rejected";
+  description?: string | null;
+  fraud_score?: number | null;
+  fraud_reason?: string | null;
+  status: "pending" | "approved" | "rejected" | "under_review" | "fraud_rejected" | string;
   created_at: string;
+}
+
+interface ApplicationStats {
+  total: number;
+  pending: number;
+  approved: number;
+  rejected: number;
 }
 
 type Tab = "all" | "pending" | "approved" | "rejected";
@@ -52,6 +62,16 @@ const STATUS_CONFIG = {
   rejected: {
     label: "Rejected",
     className: "text-destructive bg-destructive/5 border-destructive/20",
+    icon: XCircle,
+  },
+  under_review: {
+    label: "Under Review",
+    className: "text-blue-600 bg-blue-50 border-blue-200",
+    icon: Clock,
+  },
+  fraud_rejected: {
+    label: "Fraud Rejected",
+    className: "text-rose-700 bg-rose-50 border-rose-200",
     icon: XCircle,
   },
 } as const;
@@ -77,8 +97,24 @@ function formatAmount(amount: string) {
   return Number(amount).toLocaleString("en-BD");
 }
 
+function getFraudReasonText(app: Application) {
+  if (app.fraud_reason && app.fraud_reason.trim().length > 0) return app.fraud_reason;
+  if (app.fraud_score !== null && app.fraud_score !== undefined) {
+    const scorePct = Math.round(Number(app.fraud_score) * 100);
+    if (scorePct >= 40) return "AI fraud review pending. Please refresh in a few seconds.";
+    return `Fraud risk is ${scorePct}%, below the 40% threshold for detailed AI review.`;
+  }
+  return "Fraud analysis is not available for this application yet.";
+}
+
 export default function MFIApplicationsPage() {
   const [applications, setApplications] = useState<Application[]>([]);
+  const [stats, setStats] = useState<ApplicationStats>({
+    total: 0,
+    pending: 0,
+    approved: 0,
+    rejected: 0,
+  });
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -102,12 +138,21 @@ export default function MFIApplicationsPage() {
     setLoading(true);
     try {
       const params = new URLSearchParams();
+      params.append("limit", "10");
       if (activeTab !== "all") params.append("status", activeTab);
       if (debouncedSearch.trim())
         params.append("search", debouncedSearch.trim());
 
       const res = await api.get(`/mfi/applications?${params.toString()}`);
       setApplications(res.data?.data ?? []);
+      setStats(
+        res.data?.meta?.stats ?? {
+          total: 0,
+          pending: 0,
+          approved: 0,
+          rejected: 0,
+        },
+      );
       setError(null);
     } catch (err: unknown) {
       const msg =
@@ -316,6 +361,25 @@ export default function MFIApplicationsPage() {
       </div>
 
       {/* ── Controls ── */}
+      <div className="grid sm:grid-cols-2 lg:grid-cols-4 gap-4">
+        {[
+          { label: "Total", value: stats.total, icon: ClipboardList, color: "text-primary" },
+          { label: "Pending", value: stats.pending, icon: Clock, color: "text-amber-600" },
+          { label: "Approved", value: stats.approved, icon: CheckCircle2, color: "text-emerald-600" },
+          { label: "Rejected", value: stats.rejected, icon: XCircle, color: "text-destructive" },
+        ].map((item) => (
+          <Card key={item.label} className="rounded-2xl border-none shadow-sm">
+            <CardContent className="p-4 flex items-center justify-between">
+              <div>
+                <p className="text-xs uppercase tracking-wider text-muted-foreground font-semibold">{item.label}</p>
+                <p className="text-2xl font-extrabold mt-1">{item.value.toLocaleString()}</p>
+              </div>
+              <item.icon size={18} className={item.color} />
+            </CardContent>
+          </Card>
+        ))}
+      </div>
+
       <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
         <div className="flex gap-2 p-1.5 bg-muted rounded-2xl overflow-x-auto w-full md:w-auto">
           {tabs.map((tab) => {
@@ -396,8 +460,19 @@ export default function MFIApplicationsPage() {
             </div>
           ) : (
             <div className="space-y-3">
+              <p className="text-xs text-muted-foreground">
+                Showing latest {applications.length} applications.
+              </p>
               {applications.map((app) => {
-                const status = STATUS_CONFIG[app.status];
+                const status =
+                  STATUS_CONFIG[app.status as keyof typeof STATUS_CONFIG] ??
+                  {
+                    label: String(app.status || "Unknown")
+                      .replace(/_/g, " ")
+                      .replace(/\b\w/g, (c) => c.toUpperCase()),
+                    className: "text-slate-600 bg-slate-50 border-slate-200",
+                    icon: Clock,
+                  };
                 const StatusIcon = status.icon;
 
                 return (
@@ -448,6 +523,32 @@ export default function MFIApplicationsPage() {
                         <User size={13} className="shrink-0" />
                         <span>{formatDate(app.created_at)}</span>
                       </div>
+                      <div
+                        className={cn(
+                          "flex items-center gap-1.5 px-2.5 py-1 rounded-lg border text-xs font-bold",
+                          app.fraud_score !== null && app.fraud_score !== undefined && Number(app.fraud_score) >= 0.4
+                            ? "text-rose-700 bg-rose-50 border-rose-300"
+                            : "text-slate-700 bg-slate-50 border-slate-200"
+                        )}
+                      >
+                        <span className="text-sm">
+                          Fraud Risk: {app.fraud_score !== null && app.fraud_score !== undefined ? `${Math.round(Number(app.fraud_score) * 100)}%` : "N/A"}
+                        </span>
+                      </div>
+                    </div>
+
+                    <div
+                      className={cn(
+                        "w-full lg:w-[420px] text-xs rounded-lg px-3 py-2 mt-2 border",
+                        app.fraud_score !== null &&
+                          app.fraud_score !== undefined &&
+                          Number(app.fraud_score) >= 0.4
+                          ? "text-rose-800 bg-rose-50 border-rose-200"
+                          : "text-slate-700 bg-slate-50 border-slate-200",
+                      )}
+                    >
+                      <span className="font-semibold">Fraud Analysis:</span>{" "}
+                      {getFraudReasonText(app)}
                     </div>
 
                     {/* Right: Actions / Status */}

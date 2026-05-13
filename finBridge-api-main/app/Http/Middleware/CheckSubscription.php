@@ -17,32 +17,9 @@ class CheckSubscription
             return $next($request);
         }
 
-        $mfiId = $user->mfi_id;
-        if (!$mfiId) {
-            $mfiId = DB::table('mfi_institutions')
-                ->where('owner_id', $user->id)
-                ->value('id');
-
-            if ($mfiId) {
-                DB::table('users')
-                    ->where('id', $user->id)
-                    ->update([
-                        'mfi_id' => $mfiId,
-                        'updated_at' => now(),
-                    ]);
-            }
-        }
-
-        if (!$mfiId) {
-            return response()->json([
-                'success' => false,
-                'message' => 'User not linked to MFI'
-            ], 403);
-        }
-
         $subscription = DB::table('subscriptions')
             ->join('subscription_plans', 'subscriptions.plan_id', '=', 'subscription_plans.id')
-            ->where('subscriptions.mfi_id', $mfiId)
+            ->where('subscriptions.mfi_id', $user->mfi_id)
             ->whereIn('subscriptions.status', ['active', 'trial']) // ✅ allow trial
             ->where(function ($q) {
                 $q->whereNull('subscriptions.end_date')

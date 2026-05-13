@@ -17,6 +17,10 @@ class DatabaseSeeder extends Seeder
     {
         $this->call(InitialSeeder::class);
 
+        if (env('SEED_MFI_ACCOUNTS', false)) {
+            $this->call(BulkMfiAccountsSeeder::class);
+        }
+
         if (env('SEED_LOAN_INSIGHTS_DEMO', false)) {
             $this->call(LoanInsightsDemoSeeder::class);
         }

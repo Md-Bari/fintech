@@ -1,4 +1,14 @@
 services:
+  loan-fraud-api:
+    build:
+      context: ./loan-fraud-api
+    container_name: loan-fraud-api
+    restart: unless-stopped
+    environment:
+      GEMINI_API_KEY: ${GEMINI_API_KEY}
+    ports:
+      - "8000:8000"
+
   db:
     image: postgres:16-alpine
     container_name: finbridge-db
@@ -28,6 +38,8 @@ services:
     depends_on:
       db:
         condition: service_healthy
+      loan-fraud-api:
+        condition: service_started
     ports:
       - "5050:80"
     volumes:
@@ -53,6 +65,7 @@ services:
       DB_DATABASE: finbridge
       DB_USERNAME: finbridge
       DB_PASSWORD: finbridge
+      FRAUD_API_URL: http://loan-fraud-api:8000/predict
       VIEW_COMPILED_PATH: /var/www/html/storage/framework/views
       CACHE_STORE: file
       QUEUE_CONNECTION: sync

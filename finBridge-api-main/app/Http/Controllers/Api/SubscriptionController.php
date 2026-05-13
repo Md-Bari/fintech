@@ -6,33 +6,9 @@ use App\Http\Controllers\Controller;
 use Illuminate\Http\Request;
 use Illuminate\Support\Str;
 use Illuminate\Support\Facades\DB;
-use Illuminate\Support\Facades\Http;
 
 class SubscriptionController extends Controller
 {
-    protected function resolveMfiId(object $user): ?string
-    {
-        if (!empty($user->mfi_id)) {
-            return (string) $user->mfi_id;
-        }
-
-        $mfiId = DB::table('mfi_institutions')
-            ->where('owner_id', $user->id)
-            ->value('id');
-
-        if ($mfiId) {
-            DB::table('users')
-                ->where('id', $user->id)
-                ->update([
-                    'mfi_id' => $mfiId,
-                    'updated_at' => now(),
-                ]);
-
-            return (string) $mfiId;
-        }
-
-        return null;
-    }
 
     public function plans()
     {
@@ -150,8 +126,7 @@ class SubscriptionController extends Controller
         $user = $request->user();
 
         // safety check
-        $mfiId = $user ? $this->resolveMfiId($user) : null;
-        if (!$user || !$mfiId) {
+        if (!$user || !$user->mfi_id) {
             return response()->json([
                 'success' => false,
                 'message' => 'User not linked to MFI'
@@ -161,7 +136,7 @@ class SubscriptionController extends Controller
         // prevent duplicate subscription
 
         $existingActive = DB::table('subscriptions')
-            ->where('mfi_id', $mfiId)
+            ->where('mfi_id', $user->mfi_id)
             ->where('status', 'active')
             ->first();
 
@@ -202,7 +177,7 @@ class SubscriptionController extends Controller
 
             DB::table('subscriptions')->insert([
                 'id' => $subscriptionId,
-                'mfi_id' => $mfiId,
+                'mfi_id' => $user->mfi_id,
                 'plan_id' => $plan->id,
                 'start_date' => now(),
                 'status' => 'pending_payment',
@@ -213,16 +188,50 @@ class SubscriptionController extends Controller
             // 2. create transaction
             $transactionId = (string) Str::uuid();
 
+            $paymentMode = env('PAYMENT_MODE', 'demo');
+
             DB::table('transactions')->insert([
                 'id' => $transactionId,
-                'mfi_id' => $mfiId,
+                'mfi_id' => $user->mfi_id,
                 'subscription_id' => $subscriptionId,
                 'amount' => $plan->price_bdt,
-                'status' => 'pending',
-                'payment_gateway' => 'sslcommerz',
+                'status' => $paymentMode === 'demo' ? 'success' : 'pending',
+                'payment_gateway' => $paymentMode === 'demo' ? 'demo' : 'sslcommerz',
+                'gateway_transaction_id' => $paymentMode === 'demo' ? ('demo_' . $transactionId) : null,
                 'created_at' => now(),
                 'updated_at' => now(),
             ]);
+
+            if ($paymentMode === 'demo') {
+                DB::table('subscriptions')
+                    ->where('mfi_id', $user->mfi_id)
+                    ->whereIn('status', ['trial', 'active'])
+                    ->update([
+                        'status' => 'expired',
+                        'updated_at' => now(),
+                    ]);
+
+                DB::table('subscriptions')
+                    ->where('id', $subscriptionId)
+                    ->update([
+                        'status' => 'active',
+                        'start_date' => now(),
+                        'end_date' => now()->addMonth(),
+                        'updated_at' => now(),
+                    ]);
+
+                DB::commit();
+
+                return response()->json([
+                    'success' => true,
+                    'message' => 'Demo payment completed',
+                    'data' => [
+                        'transaction_id' => $transactionId,
+                        'subscription_id' => $subscriptionId,
+                        'status' => 'success',
+                    ],
+                ]);
+            }
 
             $backend = config('app.url');
 
@@ -293,7 +302,8 @@ class SubscriptionController extends Controller
 
     public function paymentSuccess(Request $request)
     {
-        $tranId = $request->tran_id;
+        $tranId = (string) $request->input('tran_id', '');
+        $bankTranId = $request->input('bank_tran_id');
         $frontend = config('app.frontend_url');
 
 
@@ -322,6 +332,7 @@ class SubscriptionController extends Controller
                 ->where('id', $tranId)
                 ->update([
                     'status' => 'success',
+                    'gateway_transaction_id' => $bankTranId ?: $transaction->gateway_transaction_id,
                     'updated_at' => now(),
                 ]);
 
@@ -361,13 +372,15 @@ class SubscriptionController extends Controller
 
     public function paymentFail(Request $request)
     {
-        $tranId = $request->tran_id;
+        $tranId = (string) $request->input('tran_id', '');
+        $bankTranId = $request->input('bank_tran_id');
 
         if ($tranId) {
             DB::table('transactions')
                 ->where('id', $tranId)
                 ->update([
                     'status' => 'failed',
+                    'gateway_transaction_id' => $bankTranId,
                     'updated_at' => now(),
                 ]);
         }
@@ -383,13 +396,15 @@ class SubscriptionController extends Controller
 
     public function paymentCancel(Request $request)
     {
-        $tranId = $request->tran_id;
+        $tranId = (string) $request->input('tran_id', '');
+        $bankTranId = $request->input('bank_tran_id');
 
         if ($tranId) {
             DB::table('transactions')
                 ->where('id', $tranId)
                 ->update([
                     'status' => 'cancelled',
+                    'gateway_transaction_id' => $bankTranId,
                     'updated_at' => now(),
                 ]);
         }
@@ -410,8 +425,7 @@ class SubscriptionController extends Controller
     {
         $user = $request->user();
 
-        $mfiId = $user ? $this->resolveMfiId($user) : null;
-        if (!$user || !$mfiId) {
+        if (!$user || !$user->mfi_id) {
             return response()->json([
                 'success' => false,
                 'message' => 'User not linked to MFI'
@@ -422,11 +436,19 @@ class SubscriptionController extends Controller
         // get latest subscription
         $subscription = DB::table('subscriptions')
             ->join('subscription_plans', 'subscriptions.plan_id', '=', 'subscription_plans.id')
-            ->where('subscriptions.mfi_id', $mfiId)
+            ->where('subscriptions.mfi_id', $user->mfi_id)
             ->where(function ($q) {
                 $q->whereNull('subscriptions.end_date')
                     ->orWhere('subscriptions.end_date', '>', now());
             })
+            ->orderByRaw("
+                CASE
+                    WHEN subscriptions.status = 'active' THEN 1
+                    WHEN subscriptions.status = 'trial' THEN 2
+                    WHEN subscriptions.status = 'pending_payment' THEN 3
+                    ELSE 4
+                END
+            ")
             ->orderByDesc('subscriptions.created_at')
             ->select(
                 'subscriptions.id',
@@ -453,30 +475,23 @@ class SubscriptionController extends Controller
 
         $usage = [
             'approved_loans' => DB::table('loan_applications')
-                ->where('mfi_id', $mfiId)
+                ->where('mfi_id', $user->mfi_id)
                 ->where('status', 'approved')
                 ->count(),
 
             'loan_products' => DB::table('loan_products')
-                ->where('mfi_id', $mfiId)
+                ->where('mfi_id', $user->mfi_id)
                 ->count(),
         ];
 
         // simple feature logic (your "unique simple idea")
 
+        $isPaidActive = $subscription->status === 'active' && strtolower($subscription->plan_name) !== 'trial';
+
         $features = [
-            'can_create_loan_products' => (
-                $subscription->plan_name === 'pro' &&
-                $subscription->status === 'active'
-            ),
-            'priority_listing' => (
-                $subscription->plan_name === 'pro' &&
-                $subscription->status === 'active'
-            ),
-            'analytics_dashboard' => (
-                $subscription->plan_name === 'pro' &&
-                $subscription->status === 'active'
-            ),
+            'can_create_loan_products' => $isPaidActive,
+            'priority_listing' => $isPaidActive,
+            'analytics_dashboard' => $isPaidActive,
             'more_features_coming' => true
         ];
 
@@ -508,8 +523,7 @@ class SubscriptionController extends Controller
     {
         $user = $request->user();
 
-        $mfiId = $user ? $this->resolveMfiId($user) : null;
-        if (!$user || !$mfiId) {
+        if (!$user || !$user->mfi_id) {
             return response()->json([
                 'success' => false,
                 'message' => 'User not linked to MFI'
@@ -519,7 +533,7 @@ class SubscriptionController extends Controller
         $payments = DB::table('transactions')
             ->join('subscriptions', 'transactions.subscription_id', '=', 'subscriptions.id')
             ->join('subscription_plans', 'subscriptions.plan_id', '=', 'subscription_plans.id')
-            ->where('transactions.mfi_id', $mfiId)
+            ->where('transactions.mfi_id', $user->mfi_id)
             ->orderByDesc('transactions.created_at')
             ->select(
                 'transactions.id',
@@ -542,20 +556,12 @@ class SubscriptionController extends Controller
     public function invoice($transactionId, Request $request)
     {
         $user = $request->user();
-        $mfiId = $user ? $this->resolveMfiId($user) : null;
-
-        if (!$user || !$mfiId) {
-            return response()->json([
-                'success' => false,
-                'message' => 'User not linked to MFI'
-            ], 400);
-        }
 
         $transaction = DB::table('transactions')
             ->join('subscriptions', 'transactions.subscription_id', '=', 'subscriptions.id')
             ->join('subscription_plans', 'subscriptions.plan_id', '=', 'subscription_plans.id')
             ->where('transactions.id', $transactionId)
-            ->where('transactions.mfi_id', $mfiId)
+            ->where('transactions.mfi_id', $user->mfi_id)
             ->select(
                 'transactions.id',
                 'transactions.amount',
@@ -589,11 +595,14 @@ class SubscriptionController extends Controller
     public function adminPayments(Request $request)
     {
         $search = trim((string) $request->query('search', ''));
+        $all = filter_var($request->query('all', false), FILTER_VALIDATE_BOOLEAN);
         $limit = (int) $request->query('limit', 100);
         if ($limit <= 0) {
             $limit = 100;
         }
-        if ($limit > 500) {
+        if ($all) {
+            $limit = 50000;
+        } elseif ($limit > 500) {
             $limit = 500;
         }
 

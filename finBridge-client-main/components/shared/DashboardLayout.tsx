@@ -12,7 +12,8 @@ import {
   ClipboardList,
   CreditCard,
   BadgeCheck,
-  TrendingUp
+  TrendingUp,
+  BrainCircuit
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { useAuthStore } from "@/store/auth.store";
@@ -32,11 +33,13 @@ const menuItems = {
     { name: "Profile", href: "/mfi", icon: User },
     { name: "Loan Products", href: "/mfi/loan-products", icon: Landmark },
     { name: "Applications", href: "/mfi/applications", icon: ClipboardList },
+    { name: "AI Insight", href: "/mfi/ai-insight", icon: BrainCircuit },
     { name: "Payments", href: "/mfi/payments", icon: CreditCard },
     { name: "My Subscription", href: "/mfi/subscription", icon: BadgeCheck },
   ],
   PLATFORM_ADMIN: [
     { name: "Profile", href: "/admin", icon: User },
+    { name: "AI Center", href: "/admin/ai-center", icon: BrainCircuit },
     { name: "MFIs", href: "/admin/mfis", icon: Landmark },
     { name: "Payments", href: "/admin/payments", icon: CreditCard },
     { name: "Applications", href: "/admin/applications", icon: ClipboardList },

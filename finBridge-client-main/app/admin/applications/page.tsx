@@ -1,70 +1,138 @@
-"use client";
+﻿"use client";
 
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Button } from "@/components/ui/button";
-import { ClipboardList, FileText, Loader2, CheckCircle2, Clock, XCircle, Search, Landmark } from "lucide-react";
+import { AlertTriangle, BarChart3, ClipboardList, Loader2, ShieldAlert, TrendingUp } from "lucide-react";
 import api from "@/lib/api";
-import { cn } from "@/lib/utils";
-import { motion } from "framer-motion";
-import { PieChart, Pie, Cell, Tooltip, ResponsiveContainer, Legend, BarChart, Bar, XAxis, YAxis } from "recharts";
+import {
+  Bar,
+  BarChart,
+  CartesianGrid,
+  Cell,
+  Legend,
+  Line,
+  LineChart,
+  Pie,
+  PieChart,
+  ResponsiveContainer,
+  Tooltip,
+  XAxis,
+  YAxis,
+} from "recharts";
 
-interface Application {
-  id: string;
-  amount: string;
-  status: "pending" | "approved" | "rejected";
-  created_at: string;
-  borrower_name: string;
+type Summary = {
+  total_applications: number;
+  fraud_applications: number;
+  avg_fraud_score: number;
+};
+
+type MfiFraudRow = {
   mfi_name: string;
-}
+  total_applications: number;
+  fraud_applications: number;
+  fraud_rate: number;
+};
+
+type DailyFraudRow = {
+  day: string;
+  fraud_applications: number;
+  total_applications: number;
+};
+
+type PurposeFraudRow = {
+  purpose: string;
+  total_applications: number;
+  fraud_applications: number;
+};
+
+type StatusRow = {
+  status: string;
+  count: number;
+  avg_fraud_score: number;
+};
+
+type InsightsResponse = {
+  threshold: number;
+  summary: Summary;
+  fraud_rate_by_mfi: MfiFraudRow[];
+  daily_fraud_trend: DailyFraudRow[];
+  fraud_by_purpose: PurposeFraudRow[];
+  status_breakdown: StatusRow[];
+};
 
 export default function AdminApplicationsPage() {
-  const [applications, setApplications] = useState<Application[]>([]);
+  const [insights, setInsights] = useState<InsightsResponse | null>(null);
   const [loading, setLoading] = useState(true);
-  const [searchTerm, setSearchTerm] = useState("");
+  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    const fetchApplications = async () => {
+    const fetchInsights = async () => {
       try {
-        const res = await api.get("/admin/applications");
-        const data = res.data?.data || [];
-        setApplications(data);
-      } catch (err) {
-        console.error("Failed to fetch admin applications", err);
+        setLoading(true);
+        setError(null);
+        const res = await api.get("/admin/application-insights", { timeout: 15000 });
+        setInsights(res.data?.data ?? null);
+      } catch (e) {
+        console.error("Failed to fetch admin application insights", e);
+        setError("Could not load application insights.");
       } finally {
         setLoading(false);
       }
     };
-    fetchApplications();
+
+    fetchInsights();
   }, []);
 
-  const filteredApps = applications.filter(app => 
-    app.borrower_name.toLowerCase().includes(searchTerm.toLowerCase()) || 
-    app.mfi_name.toLowerCase().includes(searchTerm.toLowerCase())
-  );
+  const fraudRatePct = useMemo(() => {
+    if (!insights?.summary?.total_applications) return 0;
+    return Math.round((insights.summary.fraud_applications / insights.summary.total_applications) * 100);
+  }, [insights]);
 
-  const approvedCount = applications.filter(a => a.status === "approved").length;
-  const pendingCount = applications.filter(a => a.status === "pending").length;
-  const rejectedCount = applications.filter(a => a.status === "rejected").length;
-  const totalVolume = applications.reduce((acc, curr) => acc + Number(curr.amount), 0);
+  const statusPie = useMemo(() => {
+    const rows = insights?.status_breakdown ?? [];
+    const colors: Record<string, string> = {
+      approved: "#10b981",
+      pending: "#f59e0b",
+      rejected: "#ef4444",
+    };
 
-  // Status Distribution Chart
-  const pieData = [
-    { name: "Approved", value: approvedCount, color: "#10b981" },
-    { name: "Pending", value: pendingCount, color: "#f59e0b" },
-    { name: "Rejected", value: rejectedCount, color: "#ef4444" },
-  ].filter(d => d.value > 0);
+    return rows.map((r) => ({
+      name: r.status,
+      value: r.count,
+      color: colors[r.status.toLowerCase()] ?? "#64748b",
+    }));
+  }, [insights]);
 
-  // Top MFIs by Application Count (Top 5)
-  const mfiCounts: Record<string, number> = {};
-  applications.forEach(app => {
-    mfiCounts[app.mfi_name] = (mfiCounts[app.mfi_name] || 0) + 1;
-  });
-  
-  const barData = Object.entries(mfiCounts)
-    .map(([name, count]) => ({ name, count }))
-    .sort((a, b) => b.count - a.count)
-    .slice(0, 5);
+  if (loading) {
+    return (
+      <div className="space-y-8 pb-10">
+        <div className="relative rounded-[2rem] overflow-hidden bg-primary p-8 md:p-10 text-primary-foreground shadow-xl shadow-primary/20">
+          <h1 className="text-3xl md:text-4xl font-extrabold tracking-tight">Global Loan Insights</h1>
+          <p className="text-primary-foreground/75 text-sm mt-2">Loading fraud intelligence dashboard...</p>
+        </div>
+        <div className="flex flex-col items-center justify-center py-20 gap-4">
+          <Loader2 size={36} className="animate-spin text-primary" />
+          <p className="text-sm text-muted-foreground">Loading insights data...</p>
+        </div>
+      </div>
+    );
+  }
+
+  if (error || !insights) {
+    return (
+      <div className="space-y-8 pb-10">
+        <Card className="rounded-[2rem] border-none shadow-sm">
+          <CardContent className="py-16 flex flex-col items-center gap-3">
+            <AlertTriangle className="text-rose-600" size={28} />
+            <p className="font-bold">Insights Unavailable</p>
+            <p className="text-sm text-muted-foreground">{error ?? "No insights data returned."}</p>
+          </CardContent>
+        </Card>
+      </div>
+    );
+  }
+
+  const summary = insights.summary;
 
   return (
     <div className="space-y-8 pb-10">
@@ -72,166 +140,136 @@ export default function AdminApplicationsPage() {
         <div className="pointer-events-none absolute -top-10 -right-10 w-48 h-48 rounded-full bg-white/10 blur-3xl" />
         <div className="pointer-events-none absolute bottom-0 left-1/3 w-32 h-32 rounded-full bg-white/5 blur-2xl" />
 
-        <div className="relative flex flex-col md:flex-row justify-between items-start md:items-center gap-6">
-          <div className="space-y-2">
-            <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-white/10 border border-white/20 text-xs font-semibold uppercase tracking-wider">
-              <ClipboardList size={12} /> Platform Oversight
-            </div>
-            <h1 className="text-3xl md:text-4xl font-extrabold tracking-tight">Global Loan Applications</h1>
-            <p className="text-primary-foreground/70 text-sm max-w-md leading-relaxed">
-              Monitor loan applications across all registered microfinance institutions.
-            </p>
+        <div className="relative space-y-2">
+          <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-white/10 border border-white/20 text-xs font-semibold uppercase tracking-wider">
+            <ClipboardList size={12} /> Platform Fraud Insights
           </div>
-          <div className="bg-white/10 border border-white/20 rounded-2xl p-4 backdrop-blur-sm shrink-0 min-w-[200px]">
-            <p className="text-sm text-primary-foreground/70 mb-1">Total Requested Volume</p>
-            <p className="text-3xl font-extrabold">৳ {totalVolume.toLocaleString()}</p>
-          </div>
+          <h1 className="text-3xl md:text-4xl font-extrabold tracking-tight">Global Loan Insights</h1>
+          <p className="text-primary-foreground/70 text-sm max-w-2xl leading-relaxed">
+            Live platform intelligence: fraud rate among MFIs, day-wise fraud volume, and category patterns behind risky applications.
+          </p>
         </div>
       </div>
 
-      {loading ? (
-        <div className="flex flex-col items-center justify-center py-20 gap-4">
-          <Loader2 size={36} className="animate-spin text-primary" />
-          <p className="text-sm text-muted-foreground">Loading applications data…</p>
-        </div>
-      ) : applications.length === 0 ? (
-        <Card className="rounded-[2rem] border-none shadow-sm">
-          <CardContent className="py-20 flex flex-col items-center gap-4 text-center">
-            <div className="w-16 h-16 rounded-full bg-muted flex items-center justify-center">
-              <FileText size={28} className="text-muted-foreground" />
-            </div>
-            <p className="font-bold">No Applications Found</p>
-            <p className="text-sm text-muted-foreground max-w-xs">
-              No loan applications have been submitted on the platform yet.
-            </p>
+      <div className="grid sm:grid-cols-2 lg:grid-cols-4 gap-4">
+        <Card className="rounded-2xl border-none shadow-sm">
+          <CardContent className="p-4">
+            <p className="text-xs text-muted-foreground uppercase tracking-wider">Total Applications</p>
+            <p className="text-3xl font-extrabold mt-1">{summary.total_applications.toLocaleString()}</p>
           </CardContent>
         </Card>
-      ) : (
-        <>
-          {/* Charts */}
-          <div className="grid lg:grid-cols-3 gap-6">
-            <Card className="rounded-[2rem] border-none shadow-sm lg:col-span-1">
-              <CardHeader>
-                <CardTitle className="text-lg font-bold">Global Success Rate</CardTitle>
-              </CardHeader>
-              <CardContent className="h-[280px]">
-                <ResponsiveContainer width="100%" height="100%">
-                  <PieChart>
-                    <Pie data={pieData} cx="50%" cy="50%" innerRadius={60} outerRadius={90} paddingAngle={5} dataKey="value">
-                      {pieData.map((entry, index) => (
-                        <Cell key={`cell-${index}`} fill={entry.color} />
-                      ))}
-                    </Pie>
-                    <Tooltip cursor={{ fill: 'transparent' }} contentStyle={{ borderRadius: '12px', border: 'none', boxShadow: '0 4px 6px -1px rgb(0 0 0 / 0.1)' }} />
-                    <Legend />
-                  </PieChart>
-                </ResponsiveContainer>
-              </CardContent>
-            </Card>
+        <Card className="rounded-2xl border-none shadow-sm">
+          <CardContent className="p-4">
+            <p className="text-xs text-muted-foreground uppercase tracking-wider">Fraud Loans ({">="} {insights.threshold}%)</p>
+            <p className="text-3xl font-extrabold mt-1 text-rose-700">{summary.fraud_applications.toLocaleString()}</p>
+          </CardContent>
+        </Card>
+        <Card className="rounded-2xl border-none shadow-sm">
+          <CardContent className="p-4">
+            <p className="text-xs text-muted-foreground uppercase tracking-wider">Overall Fraud Rate</p>
+            <p className="text-3xl font-extrabold mt-1">{fraudRatePct}%</p>
+          </CardContent>
+        </Card>
+        <Card className="rounded-2xl border-none shadow-sm">
+          <CardContent className="p-4">
+            <p className="text-xs text-muted-foreground uppercase tracking-wider">Average Fraud Score</p>
+            <p className="text-3xl font-extrabold mt-1">{Number(summary.avg_fraud_score || 0).toFixed(1)}%</p>
+          </CardContent>
+        </Card>
+      </div>
 
-            <Card className="rounded-[2rem] border-none shadow-sm lg:col-span-2">
-              <CardHeader>
-                <CardTitle className="text-lg font-bold">Top MFIs by Application Volume</CardTitle>
-              </CardHeader>
-              <CardContent className="h-[280px]">
-                <ResponsiveContainer width="100%" height="100%">
-                  <BarChart data={barData} layout="vertical" margin={{ top: 0, right: 30, left: 20, bottom: 0 }}>
-                    <XAxis type="number" hide />
-                    <YAxis dataKey="name" type="category" axisLine={false} tickLine={false} tick={{ fontSize: 12, fill: '#64748b' }} width={120} />
-                    <Tooltip 
-                      cursor={{ fill: 'transparent' }} 
-                      contentStyle={{ borderRadius: '12px', border: 'none', boxShadow: '0 4px 6px -1px rgb(0 0 0 / 0.1)' }} 
-                      formatter={(value: any) => [value, 'Applications']}
-                    />
-                    <Bar dataKey="count" fill="#3b82f6" radius={[0, 6, 6, 0]} barSize={24} />
-                  </BarChart>
-                </ResponsiveContainer>
-              </CardContent>
-            </Card>
-          </div>
+      <div className="grid lg:grid-cols-2 gap-6">
+        <Card className="rounded-[2rem] border-none shadow-sm">
+          <CardHeader>
+            <CardTitle className="text-lg font-bold inline-flex items-center gap-2"><ShieldAlert size={16} /> Fraud Rate Among MFIs</CardTitle>
+          </CardHeader>
+          <CardContent className="h-[360px]">
+            <ResponsiveContainer width="100%" height="100%">
+              <BarChart data={insights.fraud_rate_by_mfi.slice(0, 10)} layout="vertical" margin={{ top: 0, right: 18, left: 28, bottom: 0 }}>
+                <CartesianGrid strokeDasharray="3 3" vertical={false} />
+                <XAxis type="number" domain={[0, 100]} tickFormatter={(v) => `${v}%`} />
+                <YAxis type="category" dataKey="mfi_name" width={130} tick={{ fontSize: 11 }} />
+                <Tooltip formatter={(value) => [`${Number(value ?? 0)}%`, "Fraud Rate"]} />
+                <Bar dataKey="fraud_rate" radius={[0, 6, 6, 0]}>
+                  {insights.fraud_rate_by_mfi.slice(0, 10).map((r, i) => (
+                    <Cell key={`mfi-rate-${i}`} fill={Number(r.fraud_rate) >= 40 ? "#ef4444" : "#0f766e"} />
+                  ))}
+                </Bar>
+              </BarChart>
+            </ResponsiveContainer>
+          </CardContent>
+        </Card>
 
-          {/* Table */}
-          <Card className="rounded-[2rem] border-none shadow-sm p-6">
-            <CardHeader className="px-0 pt-0 mb-4 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
-              <CardTitle className="text-xl font-extrabold tracking-tight">Application Ledger</CardTitle>
-              <div className="relative w-full sm:w-72">
-                <Search size={16} className="absolute left-3.5 top-1/2 -translate-y-1/2 text-muted-foreground" />
-                <input 
-                  type="text" 
-                  placeholder="Search borrower or MFI..." 
-                  value={searchTerm}
-                  onChange={(e) => setSearchTerm(e.target.value)}
-                  className="w-full h-10 pl-10 pr-4 rounded-xl border border-border bg-card focus:outline-none focus:ring-2 focus:ring-primary/40 focus:border-primary transition-all text-sm"
-                />
+        <Card className="rounded-[2rem] border-none shadow-sm">
+          <CardHeader>
+            <CardTitle className="text-lg font-bold inline-flex items-center gap-2"><TrendingUp size={16} /> Fraud Loans Day-Wise (Last 30 Days)</CardTitle>
+          </CardHeader>
+          <CardContent className="h-[360px]">
+            <ResponsiveContainer width="100%" height="100%">
+              <LineChart data={insights.daily_fraud_trend}>
+                <CartesianGrid strokeDasharray="3 3" />
+                <XAxis dataKey="day" tick={{ fontSize: 11 }} />
+                <YAxis allowDecimals={false} />
+                <Tooltip />
+                <Legend />
+                <Line type="monotone" dataKey="fraud_applications" stroke="#ef4444" strokeWidth={2} name="Fraud Loans" dot={false} />
+                <Line type="monotone" dataKey="total_applications" stroke="#0f766e" strokeWidth={2} name="Total Loans" dot={false} />
+              </LineChart>
+            </ResponsiveContainer>
+          </CardContent>
+        </Card>
+      </div>
+
+      <div className="grid lg:grid-cols-2 gap-6">
+        <Card className="rounded-[2rem] border-none shadow-sm">
+          <CardHeader>
+            <CardTitle className="text-lg font-bold inline-flex items-center gap-2"><BarChart3 size={16} /> Fraud-Prone Purposes</CardTitle>
+          </CardHeader>
+          <CardContent className="h-[360px]">
+            <ResponsiveContainer width="100%" height="100%">
+              <BarChart data={insights.fraud_by_purpose} margin={{ top: 0, right: 20, left: 0, bottom: 60 }}>
+                <CartesianGrid strokeDasharray="3 3" vertical={false} />
+                <XAxis dataKey="purpose" angle={-25} textAnchor="end" interval={0} height={80} tick={{ fontSize: 10 }} />
+                <YAxis allowDecimals={false} />
+                <Tooltip />
+                <Bar dataKey="fraud_applications" fill="#ef4444" radius={[6, 6, 0, 0]} />
+              </BarChart>
+            </ResponsiveContainer>
+          </CardContent>
+        </Card>
+
+        <Card className="rounded-[2rem] border-none shadow-sm">
+          <CardHeader>
+            <CardTitle className="text-lg font-bold">Application Status Mix and Risk</CardTitle>
+          </CardHeader>
+          <CardContent className="grid grid-cols-2 gap-4 h-[360px]">
+            <div className="h-full">
+              <ResponsiveContainer width="100%" height="100%">
+                <PieChart>
+                  <Pie data={statusPie} dataKey="value" innerRadius={50} outerRadius={85} paddingAngle={3}>
+                    {statusPie.map((s, i) => (
+                      <Cell key={`status-${i}`} fill={s.color} />
+                    ))}
+                  </Pie>
+                  <Tooltip />
+                  <Legend />
+                </PieChart>
+              </ResponsiveContainer>
+            </div>
+            <div className="overflow-y-auto pr-1">
+              <div className="space-y-3">
+                {insights.status_breakdown.map((row) => (
+                  <div key={row.status} className="rounded-xl border border-border p-3">
+                    <p className="text-xs uppercase tracking-wider text-muted-foreground">{row.status}</p>
+                    <p className="text-lg font-extrabold">{row.count.toLocaleString()}</p>
+                    <p className="text-xs text-muted-foreground">Avg Fraud Score: {Number(row.avg_fraud_score || 0).toFixed(1)}%</p>
+                  </div>
+                ))}
               </div>
-            </CardHeader>
-            <CardContent className="px-0">
-              <div className="overflow-x-auto">
-                <table className="w-full text-left">
-                  <thead>
-                    <tr className="border-b border-border text-muted-foreground text-xs uppercase tracking-wider">
-                      <th className="pb-4 font-bold pl-4">Application ID</th>
-                      <th className="pb-4 font-bold">Borrower</th>
-                      <th className="pb-4 font-bold">Institution (MFI)</th>
-                      <th className="pb-4 font-bold">Requested</th>
-                      <th className="pb-4 font-bold text-right pr-4">Status</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-border">
-                    {filteredApps.length === 0 ? (
-                      <tr>
-                        <td colSpan={5} className="py-10 text-center text-muted-foreground">
-                          No matching applications found.
-                        </td>
-                      </tr>
-                    ) : (
-                      filteredApps.map((app, i) => (
-                        <motion.tr 
-                          key={app.id} 
-                          initial={{ opacity: 0, y: 10 }}
-                          animate={{ opacity: 1, y: 0 }}
-                          transition={{ delay: i * 0.05 }}
-                          className="group hover:bg-muted/30 transition-colors"
-                        >
-                          <td className="py-4 pl-4">
-                            <p className="font-mono text-xs font-bold text-foreground">{app.id.slice(0,8).toUpperCase()}</p>
-                            <p className="text-[10px] text-muted-foreground mt-0.5">{new Date(app.created_at).toLocaleDateString("en-US", { year: 'numeric', month: 'short', day: 'numeric' })}</p>
-                          </td>
-                          <td className="py-4">
-                            <p className="font-bold text-sm">{app.borrower_name}</p>
-                          </td>
-                          <td className="py-4">
-                            <div className="flex items-center gap-1.5">
-                              <Landmark size={14} className="text-primary/60" />
-                              <span className="text-sm font-medium">{app.mfi_name}</span>
-                            </div>
-                          </td>
-                          <td className="py-4 text-sm font-extrabold text-primary whitespace-nowrap">
-                            ৳ {Number(app.amount).toLocaleString()}
-                          </td>
-                          <td className="py-4 text-right pr-4">
-                            <span className={cn(
-                              "inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md text-[10px] font-bold uppercase tracking-wider border ml-auto",
-                              app.status === "approved" ? "text-emerald-600 bg-emerald-50 border-emerald-200" :
-                              app.status === "rejected" ? "text-destructive bg-destructive/10 border-destructive/20" :
-                              "text-amber-600 bg-amber-50 border-amber-200"
-                            )}>
-                              {app.status === "approved" && <CheckCircle2 size={12} />}
-                              {app.status === "rejected" && <XCircle size={12} />}
-                              {app.status === "pending" && <Clock size={12} />}
-                              {app.status}
-                            </span>
-                          </td>
-                        </motion.tr>
-                      ))
-                    )}
-                  </tbody>
-                </table>
-              </div>
-            </CardContent>
-          </Card>
-        </>
-      )}
+            </div>
+          </CardContent>
+        </Card>
+      </div>
     </div>
   );
 }

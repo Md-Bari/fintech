@@ -34,6 +34,7 @@ export default function AdminMFIsPage() {
   }, []);
 
   const activeCount = mfis.filter(m => m.status === "active").length;
+  const latestMfis = mfis.slice(0, 10);
 
   return (
     <div className="space-y-8 pb-10">
@@ -50,6 +51,7 @@ export default function AdminMFIsPage() {
             <p className="text-primary-foreground/70 text-sm max-w-md leading-relaxed">
               View and manage all Microfinance Institutions onboarded to the platform.
             </p>
+            <p className="text-xs text-primary-foreground/80">Showing latest 10 institutions. KPI is calculated from all institutions.</p>
           </div>
           <div className="bg-white/10 border border-white/20 rounded-2xl p-4 backdrop-blur-sm shrink-0 min-w-[160px]">
             <p className="text-sm text-primary-foreground/70 mb-1">Active Institutions</p>
@@ -92,7 +94,7 @@ export default function AdminMFIsPage() {
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-border">
-                  {mfis.map((mfi, i) => (
+                  {latestMfis.map((mfi, i) => (
                     <motion.tr 
                       key={mfi.id} 
                       initial={{ opacity: 0, y: 10 }}
