@@ -1,0 +1,81 @@
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: finbridge-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: finbridge
+      POSTGRES_USER: finbridge
+      POSTGRES_PASSWORD: finbridge
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U finbridge -d finbridge"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  pgadmin:
+    image: dpage/pgadmin4:8
+    container_name: finbridge-pgadmin
+    restart: unless-stopped
+    environment:
+      PGADMIN_DEFAULT_EMAIL: admin@finbridge.com
+      PGADMIN_DEFAULT_PASSWORD: admin123
+      PGADMIN_CONFIG_SERVER_MODE: "False"
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "5050:80"
+    volumes:
+      - pgadmin_data:/var/lib/pgadmin
+      - ./docker/pgadmin/servers.json:/pgadmin4/servers.json:ro
+
+  api:
+    build:
+      context: ./finBridge-api-main
+      dockerfile: Dockerfile
+    container_name: finbridge-api
+    restart: unless-stopped
+    environment:
+      APP_ENV: local
+      APP_DEBUG: "true"
+      APP_KEY: base64:vAfPWzNvc3aIDeNYN8hEIjoEyqKh6rANaSUJvjJWb9U=
+      APP_URL: http://localhost:9000
+      FRONTEND_URL: http://localhost:3000
+      CORS_ALLOWED_ORIGINS: http://localhost:3000
+      DB_CONNECTION: pgsql
+      DB_HOST: db
+      DB_PORT: 5432
+      DB_DATABASE: finbridge
+      DB_USERNAME: finbridge
+      DB_PASSWORD: finbridge
+      VIEW_COMPILED_PATH: /var/www/html/storage/framework/views
+      CACHE_STORE: file
+      QUEUE_CONNECTION: sync
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "9000:9000"
+
+  client:
+    build:
+      context: ./finBridge-client-main
+      dockerfile: Dockerfile
+    container_name: finbridge-client
+    restart: unless-stopped
+    environment:
+      NEXT_PUBLIC_API_URL: http://localhost:9000/api/v1
+      PORT: 3000
+    depends_on:
+      - api
+    ports:
+      - "3000:3000"
+
+volumes:
+  postgres_data:
+  pgadmin_data:

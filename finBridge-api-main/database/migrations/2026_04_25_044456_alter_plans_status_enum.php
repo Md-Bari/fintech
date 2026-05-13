@@ -1,0 +1,40 @@
+<?php
+
+use Illuminate\Database\Migrations\Migration;
+use Illuminate\Support\Facades\DB;
+
+return new class extends Migration
+{
+    public function up(): void
+    {
+        if (!$this->isPostgres()) {
+            return;
+        }
+
+        DB::statement("ALTER TABLE subscription_plans ALTER COLUMN status DROP DEFAULT");
+
+        DB::statement("
+            ALTER TABLE subscription_plans 
+            ALTER COLUMN status TYPE app_status_enum 
+            USING status::text::app_status_enum
+        ");
+
+        DB::statement("ALTER TABLE subscription_plans ALTER COLUMN status SET DEFAULT 'active'");
+    }
+
+    public function down(): void
+    {
+        if (!$this->isPostgres()) {
+            return;
+        }
+
+        DB::statement("ALTER TABLE subscription_plans ALTER COLUMN status DROP DEFAULT");
+        DB::statement("ALTER TABLE subscription_plans ALTER COLUMN status TYPE varchar");
+        DB::statement("ALTER TABLE subscription_plans ALTER COLUMN status SET DEFAULT 'active'");
+    }
+
+    private function isPostgres(): bool
+    {
+        return DB::connection()->getDriverName() === 'pgsql';
+    }
+};
