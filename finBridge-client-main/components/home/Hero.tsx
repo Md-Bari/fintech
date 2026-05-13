@@ -11,9 +11,25 @@ import { ArrowRight, ShieldCheck, Zap, Sparkles } from "lucide-react";
 export default function Hero() {
   const { isAuthenticated, user } = useAuthStore();
   const [isMounted, setIsMounted] = React.useState(false);
+  const [activeEntrepreneurs, setActiveEntrepreneurs] = React.useState<number | null>(null);
 
   React.useEffect(() => {
     setIsMounted(true);
+  }, []);
+
+  React.useEffect(() => {
+    const loadStats = async () => {
+      try {
+        const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:9000/api/v1"}/platform/stats`);
+        const json = await res.json();
+        if (json?.success) {
+          setActiveEntrepreneurs(Number(json.data?.active_entrepreneurs ?? 0));
+        }
+      } catch {
+        setActiveEntrepreneurs(null);
+      }
+    };
+    loadStats();
   }, []);
 
   return (
@@ -87,7 +103,9 @@ export default function Hero() {
               ))}
             </div>
             <div>
-              <p className="font-black text-2xl tracking-tight">10,000+</p>
+              <p className="font-black text-2xl tracking-tight">
+                {activeEntrepreneurs === null ? "..." : activeEntrepreneurs.toLocaleString()}
+              </p>
               <p className="text-sm font-bold text-muted-foreground uppercase tracking-widest">Active Entrepreneurs</p>
             </div>
           </div>
@@ -161,4 +179,3 @@ export default function Hero() {
     </section>
   );
 }
-

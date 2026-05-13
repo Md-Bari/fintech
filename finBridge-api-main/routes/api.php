@@ -20,6 +20,7 @@ Route::prefix('v1')->group(function () {
     Route::get('/mfis', [MfiController::class, 'index']);
 
     Route::get('/loan-products', [LoanProductController::class, 'index']);
+    Route::get('/platform/stats', [AdminController::class, 'publicPlatformStats']);
 
     // subscription
     Route::get('/subscription-plans', [SubscriptionController::class, 'plans']);
@@ -112,6 +113,9 @@ Route::prefix('v1')->group(function () {
 
         Route::get('/admin/reports/revenue', [AdminController::class, 'revenueReport']);
         Route::get('/admin/ai-center-insights', [AdminController::class, 'aiCenterInsights']);
+        Route::post('/admin/ai-center-reports', [AdminController::class, 'createAiCenterReport']);
+        Route::get('/admin/ai-center-reports', [AdminController::class, 'listAiCenterReports']);
+        Route::get('/admin/ai-center-reports/{id}', [AdminController::class, 'showAiCenterReport']);
 
         Route::get('/admin/payments', [SubscriptionController::class, 'adminPayments']);
 
