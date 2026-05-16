@@ -10,6 +10,7 @@ import SubscriptionPlans from "@/components/home/SubscriptionPlans";
 import Testimonials from "@/components/home/Testimonials";
 import FAQ from "@/components/home/FAQ";
 import FinalCTA from "@/components/home/FinalCTA";
+import FinancialAssistantChat from "@/components/home/FinancialAssistantChat";
 
 export default function HomePage() {
   return (
@@ -25,7 +26,7 @@ export default function HomePage() {
       <Testimonials />
       <FAQ />
       <FinalCTA />
+      <FinancialAssistantChat />
     </div>
   );
 }
-

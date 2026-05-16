@@ -5,9 +5,13 @@ services:
     container_name: loan-fraud-api
     restart: unless-stopped
     environment:
+      FRAUD_API_PUBLIC_BASE: http://localhost:8000
       GEMINI_API_KEY: ${GEMINI_API_KEY}
     ports:
       - "8000:8000"
+    volumes:
+      - ./loan-fraud-api/stored_nids:/app/stored_nids
+      - ./loan-fraud-api/uploads:/app/uploads
 
   db:
     image: postgres:16-alpine
@@ -66,6 +70,7 @@ services:
       DB_USERNAME: finbridge
       DB_PASSWORD: finbridge
       FRAUD_API_URL: http://loan-fraud-api:8000/predict
+      FRAUD_API_NID_VERIFY_URL: http://loan-fraud-api:8000/nid/verify-upload
       VIEW_COMPILED_PATH: /var/www/html/storage/framework/views
       CACHE_STORE: file
       QUEUE_CONNECTION: sync

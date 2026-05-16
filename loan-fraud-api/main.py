@@ -1,17 +1,33 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi.staticfiles import StaticFiles
 import pandas as pd
 import joblib
 from pathlib import Path
 import os
 import json
+import re
+import shutil
+import sqlite3
+import uuid
 from datetime import datetime, timezone
 from urllib import request as urlrequest
-from schemas import LoanApplication, ExplainRequest
+from PIL import Image, ImageOps
+import pytesseract
+import imagehash
+from schemas import LoanApplication, ExplainRequest, FinanceChatRequest
 
 app = FastAPI(title="Loan Fraud Detection API")
 
 BASE_DIR = Path(__file__).resolve().parent
 MODELS_DIR = BASE_DIR / "models"
+STORED_NIDS_DIR = BASE_DIR / "stored_nids"
+UPLOADS_DIR = BASE_DIR / "uploads"
+NID_DB_PATH = BASE_DIR / "nid_kyc.db"
+STORED_NIDS_DIR.mkdir(parents=True, exist_ok=True)
+UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
+PUBLIC_BASE_URL = os.getenv("FRAUD_API_PUBLIC_BASE", "http://localhost:8000").rstrip("/")
+app.mount("/files/stored_nids", StaticFiles(directory=str(STORED_NIDS_DIR)), name="stored_nids_files")
+app.mount("/files/uploads", StaticFiles(directory=str(UPLOADS_DIR)), name="upload_files")
 
 
 def resolve_model_path(default_name: str, pattern: str) -> Path:
@@ -29,6 +45,180 @@ PREPROCESSOR_PATH = resolve_model_path("preprocessor.pkl", "preprocessor*.pkl")
 
 model = joblib.load(MODEL_PATH)
 preprocessor = joblib.load(PREPROCESSOR_PATH)
+
+
+def _db_conn() -> sqlite3.Connection:
+    conn = sqlite3.connect(NID_DB_PATH)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def init_nid_db() -> None:
+    with _db_conn() as conn:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS nid_references (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                customer_unique_id TEXT NOT NULL,
+                nid_number TEXT NOT NULL,
+                image_path TEXT NOT NULL,
+                image_hash TEXT,
+                extracted_name TEXT,
+                created_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_nid_references_nid ON nid_references(nid_number)")
+
+
+init_nid_db()
+
+
+def _utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _normalize_nid(value: str | None) -> str:
+    if not value:
+        return ""
+    bn_to_en = str.maketrans("০১২৩৪৫৬৭৮৯", "0123456789")
+    value = value.translate(bn_to_en)
+    return re.sub(r"\D", "", value)
+
+
+def _extract_nid_number(text: str) -> str:
+    normalized = _normalize_nid(text or "")
+    labeled = re.search(r"(?:ID|NID)\s*(?:NO|NUMBER)?\s*[:\-]?\s*([0-9][0-9\s]{8,20})", (text or ""), flags=re.IGNORECASE)
+    if labeled:
+        digits = _normalize_nid(labeled.group(1))
+        if len(digits) >= 10:
+            return digits
+
+    compact = re.sub(r"\s+", "", normalized or "")
+    for pattern in (r"\d{17}", r"\d{16}", r"\d{13}", r"\d{10}"):
+        m = re.search(pattern, compact)
+        if m:
+            return m.group(0)
+    return ""
+
+
+def _extract_name(text: str) -> str:
+    lines = [ln.strip() for ln in (text or "").splitlines() if ln.strip()]
+    for line in lines:
+        m = re.search(r"\bName\s*[:\-]\s*(.+)$", line, flags=re.IGNORECASE)
+        if m:
+            return m.group(1).strip(" .,-")
+    for i, line in enumerate(lines):
+        if re.fullmatch(r"Name\.?", line, flags=re.IGNORECASE) and i + 1 < len(lines):
+            candidate = lines[i + 1].strip(" .,-")
+            if re.fullmatch(r"[A-Za-z .'-]{4,80}", candidate):
+                return candidate
+    for line in lines:
+        if re.fullmatch(r"[A-Za-z .'-]{4,80}", line):
+            return line
+    return ""
+
+
+def _ocr_text(image_path: Path) -> str:
+    with Image.open(image_path) as img:
+        gray = ImageOps.grayscale(img)
+        return pytesseract.image_to_string(gray, lang="eng").strip()
+
+
+def _phash(image_path: Path) -> str:
+    with Image.open(image_path) as img:
+        return str(imagehash.phash(img))
+
+
+def _image_hashes(image_path: Path) -> dict[str, str]:
+    with Image.open(image_path) as img:
+        return {
+            "phash": str(imagehash.phash(img)),
+            "dhash": str(imagehash.dhash(img)),
+            "whash": str(imagehash.whash(img)),
+        }
+
+
+def _similarity_from_hex(hash_a: str, hash_b: str) -> float:
+    a = imagehash.hex_to_hash(hash_a)
+    b = imagehash.hex_to_hash(hash_b)
+    return max(0.0, (1.0 - ((a - b) / 64.0)) * 100.0)
+
+
+def _similarity_from_hash_sets(upload_hashes: dict[str, str], ref_hashes: dict[str, str]) -> float:
+    scores: list[float] = []
+    for key in ("phash", "dhash", "whash"):
+        if upload_hashes.get(key) and ref_hashes.get(key):
+            scores.append(_similarity_from_hex(upload_hashes[key], ref_hashes[key]))
+    if not scores:
+        return 0.0
+    # Weighted toward best score for robustness against compression/crop noise.
+    best = max(scores)
+    avg = sum(scores) / len(scores)
+    return round((best * 0.7) + (avg * 0.3), 2)
+
+
+def _best_reference_visual_match(upload_path: Path) -> dict | None:
+    candidates: list[Path] = []
+    for ext in (".jpg", ".jpeg", ".png", ".webp", ".bmp"):
+        candidates.extend(STORED_NIDS_DIR.glob(f"*{ext}"))
+
+    if not candidates:
+        return None
+
+    upload_hashes = _image_hashes(upload_path)
+    best_score = -1.0
+    best_ref: Path | None = None
+
+    for candidate in candidates:
+        try:
+            ref_hashes = _image_hashes(candidate)
+            score = _similarity_from_hash_sets(upload_hashes, ref_hashes)
+            if score > best_score:
+                best_score = score
+                best_ref = candidate
+        except Exception:
+            continue
+
+    if best_ref is None:
+        return None
+
+    # Extract any NID-like digits from filename if present.
+    guessed_nid = _normalize_nid(best_ref.stem)
+    return {
+        "image_path": str(best_ref),
+        "nid_number": guessed_nid or None,
+        "similarity_score": round(best_score, 2),
+    }
+
+
+def _find_reference_by_nid(nid_number: str) -> dict | None:
+    with _db_conn() as conn:
+        row = conn.execute(
+            """
+            SELECT customer_unique_id, nid_number, image_path, image_hash, extracted_name
+            FROM nid_references
+            WHERE nid_number = ?
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            (nid_number,),
+        ).fetchone()
+        if row:
+            return dict(row)
+
+    # fallback by filename if db row absent
+    for ext in (".jpg", ".jpeg", ".png", ".webp", ".bmp"):
+        p = STORED_NIDS_DIR / f"{nid_number}{ext}"
+        if p.exists():
+            return {
+                "customer_unique_id": "",
+                "nid_number": nid_number,
+                "image_path": str(p),
+                "image_hash": None,
+                "extracted_name": "",
+            }
+    return None
 
 
 def to_model_payload(application: LoanApplication) -> dict:
@@ -221,6 +411,74 @@ def gemini_explanation_from_fields(payload: ExplainRequest) -> str:
     )
 
 
+def _is_finance_message(message: str) -> bool:
+    text = (message or "").lower()
+    finance_keywords = [
+        "loan", "emi", "interest", "finance", "financial", "credit", "repay", "installment",
+        "debt", "amount", "income", "budget", "bank", "mfi", "borrowing", "tenure", "package",
+    ]
+    return any(k in text for k in finance_keywords)
+
+
+def finance_chat_response(message: str, packages: list[dict], history: list[dict]) -> str:
+    if not _is_finance_message(message):
+        return "I can only help with financial topics, loan guidance, repayment planning, and choosing suitable loan packages."
+
+    packages = packages[:20]
+    compact_packages = []
+    for p in packages:
+        compact_packages.append({
+            "name": p.get("name"),
+            "mfi_name": p.get("mfi_name"),
+            "min_amount": p.get("min_amount"),
+            "max_amount": p.get("max_amount"),
+            "interest_rate": p.get("interest_rate"),
+            "duration_months": p.get("duration_months"),
+            "id": p.get("id"),
+        })
+
+    api_key = os.getenv("GEMINI_API_KEY", "").strip()
+    if not api_key:
+        if compact_packages:
+            top = compact_packages[:3]
+            suggestions = ", ".join([f"{x.get('name')} ({x.get('mfi_name')})" for x in top])
+            return f"Based on available packages, consider: {suggestions}. Tell me your desired amount and tenure to refine suggestions."
+        return "Share your desired amount, income, and loan duration, and I will suggest suitable loan packages."
+
+    history_text = "\n".join(
+        [f"{(h.get('role') or 'user')}: {str(h.get('content') or '')[:250]}" for h in (history or [])[-8:]]
+    )
+    prompt = (
+        "You are FinBridge Financial Agent, a professional loan advisor.\n"
+        "Strict policy:\n"
+        "1) Respond only to finance, loans, EMI, repayment planning, eligibility, and budgeting.\n"
+        "2) If user asks non-finance questions, refuse briefly and redirect to finance.\n"
+        "3) If amount or duration is missing, ask only one focused follow-up question.\n"
+        "4) When recommending, mention 2-3 best matching packages from provided list by exact name.\n"
+        "5) Keep answer practical, clear, and under 140 words.\n"
+        "6) Never invent package names not in provided list.\n\n"
+        f"Available packages JSON:\n{json.dumps(compact_packages, ensure_ascii=False)}\n\n"
+        f"Recent chat:\n{history_text}\n\n"
+        f"User message: {message}\n"
+    )
+
+    model_candidates = ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash"]
+    discovered = _list_available_models(api_key)
+    if discovered:
+        preferred = [m for m in discovered if "flash" in m or "pro" in m]
+        model_candidates = preferred[:5] if preferred else discovered[:5]
+
+    for model_name in model_candidates:
+        try:
+            text = _call_gemini(api_key, model_name, prompt)
+            if text:
+                return text
+        except Exception:
+            continue
+
+    return "I can help with loan amount planning, tenure selection, and package comparison. Please share your target amount and repayment duration."
+
+
 @app.get("/")
 def home():
     return {"message": "Loan Fraud Detection API is running"}
@@ -280,3 +538,164 @@ def predict_pending_applications(applications: list[LoanApplication]):
 def explain_fraud(payload: ExplainRequest):
     reason = gemini_explanation_from_fields(payload)
     return {"fraud_reason": reason}
+
+
+@app.post("/chat/financial-assistant")
+def financial_assistant(payload: FinanceChatRequest):
+    reply = finance_chat_response(payload.message, payload.packages or [], payload.history or [])
+    return {"reply": reply}
+
+
+@app.post("/nid/register-reference")
+async def register_reference_nid(
+    customer_unique_id: str = Form(...),
+    file: UploadFile = File(...),
+):
+    if not file.content_type or not file.content_type.startswith("image/"):
+        raise HTTPException(status_code=400, detail="Only image files are supported")
+
+    ext = Path(file.filename or "").suffix or ".jpg"
+    temp_path = UPLOADS_DIR / f"ref_{uuid.uuid4().hex}{ext}"
+    with temp_path.open("wb") as out:
+        shutil.copyfileobj(file.file, out)
+
+    text = _ocr_text(temp_path)
+    nid_number = _normalize_nid(_extract_nid_number(text))
+    extracted_name = _extract_name(text)
+    if not nid_number:
+        temp_path.unlink(missing_ok=True)
+        raise HTTPException(status_code=422, detail="NID number not found from OCR")
+
+    final_path = STORED_NIDS_DIR / f"{nid_number}.jpg"
+    shutil.copyfile(temp_path, final_path)
+    temp_path.unlink(missing_ok=True)
+    ref_hash = _phash(final_path)
+
+    with _db_conn() as conn:
+        conn.execute(
+            """
+            INSERT INTO nid_references(customer_unique_id, nid_number, image_path, image_hash, extracted_name, created_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (customer_unique_id, nid_number, str(final_path), ref_hash, extracted_name, _utc_now()),
+        )
+
+    return {
+        "success": True,
+        "customer_unique_id": customer_unique_id,
+        "nid_number": nid_number,
+        "extracted_name": extracted_name,
+        "stored_image_path": str(final_path),
+        "stored_image_url": f"{PUBLIC_BASE_URL}/files/stored_nids/{final_path.name}",
+    }
+
+
+@app.post("/nid/verify-upload")
+async def verify_uploaded_nid(
+    customer_unique_id: str = Form(...),
+    file: UploadFile = File(...),
+):
+    if not file.content_type or not file.content_type.startswith("image/"):
+        raise HTTPException(status_code=400, detail="Only image files are supported")
+
+    ext = Path(file.filename or "").suffix or ".jpg"
+    upload_path = UPLOADS_DIR / f"upload_{uuid.uuid4().hex}{ext}"
+    with upload_path.open("wb") as out:
+        shutil.copyfileobj(file.file, out)
+
+    text = _ocr_text(upload_path)
+    nid_number = _normalize_nid(_extract_nid_number(text))
+    extracted_name = _extract_name(text)
+    if not nid_number:
+        return {
+            "success": False,
+            "customer_unique_id": customer_unique_id,
+            "message": "NID number not found in OCR text",
+            "matched": False,
+            "similarity_score": 0.0,
+            "nid_number": None,
+            "extracted_name": extracted_name or None,
+            "raw_text": text,
+            "uploaded_image_path": str(upload_path),
+            "uploaded_image_url": f"{PUBLIC_BASE_URL}/files/uploads/{upload_path.name}",
+        }
+
+    reference = _find_reference_by_nid(nid_number)
+    if not reference:
+        fallback = _best_reference_visual_match(upload_path)
+        if fallback and fallback["similarity_score"] >= 70.0:
+            ref_path = Path(fallback["image_path"])
+            return {
+                "success": True,
+                "customer_unique_id": customer_unique_id,
+                "message": "Matched by visual fallback from stored_nids",
+                "matched": True,
+                "similarity_score": float(fallback["similarity_score"]),
+                "nid_number": nid_number or fallback.get("nid_number"),
+                "extracted_name": extracted_name or None,
+                "reference_found": True,
+                "reference_image_path": str(ref_path),
+                "reference_image_url": f"{PUBLIC_BASE_URL}/files/stored_nids/{ref_path.name}",
+                "uploaded_image_path": str(upload_path),
+                "uploaded_image_url": f"{PUBLIC_BASE_URL}/files/uploads/{upload_path.name}",
+                "raw_text": text,
+            }
+        return {
+            "success": True,
+            "customer_unique_id": customer_unique_id,
+            "message": "Reference image not found for extracted NID",
+            "matched": False,
+            "similarity_score": 0.0,
+            "nid_number": nid_number,
+            "extracted_name": extracted_name or None,
+            "reference_found": False,
+            "raw_text": text,
+            "uploaded_image_path": str(upload_path),
+            "uploaded_image_url": f"{PUBLIC_BASE_URL}/files/uploads/{upload_path.name}",
+        }
+
+    ref_path = Path(reference["image_path"])
+    if not ref_path.exists():
+        return {
+            "success": True,
+            "customer_unique_id": customer_unique_id,
+            "message": "Reference path missing on disk",
+            "matched": False,
+            "similarity_score": 0.0,
+            "nid_number": nid_number,
+            "extracted_name": extracted_name or None,
+            "reference_found": False,
+            "raw_text": text,
+            "uploaded_image_path": str(upload_path),
+            "uploaded_image_url": f"{PUBLIC_BASE_URL}/files/uploads/{upload_path.name}",
+        }
+
+    upload_hashes = _image_hashes(upload_path)
+    ref_hashes = _image_hashes(ref_path)
+    similarity = _similarity_from_hash_sets(upload_hashes, ref_hashes)
+    matched = similarity >= 55.0
+
+    if not matched:
+        fallback = _best_reference_visual_match(upload_path)
+        if fallback and fallback["similarity_score"] >= similarity:
+            similarity = float(fallback["similarity_score"])
+            if similarity >= 70.0:
+                matched = True
+                ref_path = Path(fallback["image_path"])
+                if not nid_number and fallback.get("nid_number"):
+                    nid_number = str(fallback["nid_number"])
+
+    return {
+        "success": True,
+        "customer_unique_id": customer_unique_id,
+        "nid_number": nid_number,
+        "extracted_name": extracted_name or None,
+        "matched": matched,
+        "similarity_score": similarity,
+        "reference_found": True,
+        "reference_image_path": str(ref_path),
+        "reference_image_url": f"{PUBLIC_BASE_URL}/files/stored_nids/{ref_path.name}",
+        "uploaded_image_path": str(upload_path),
+        "uploaded_image_url": f"{PUBLIC_BASE_URL}/files/uploads/{upload_path.name}",
+        "raw_text": text,
+    }

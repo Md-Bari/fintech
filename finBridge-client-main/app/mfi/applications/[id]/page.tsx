@@ -49,6 +49,14 @@ interface ApplicationDetails {
     created_at: string;
   };
   documents: Document[];
+  nid_verification?: {
+    verification_status?: string;
+    matched_reference?: boolean;
+    similarity_score?: number | null;
+    nid_number?: string | null;
+    extracted_name?: string | null;
+    ocr_confidence?: number | null;
+  } | null;
 }
 
 const STATUS_CONFIG = {
@@ -71,6 +79,17 @@ function formatAmount(amount: string) {
   return Number(amount).toLocaleString("en-BD");
 }
 
+function normalizeDocumentUrl(url: string, filePath?: string) {
+  const pick = (url || filePath || "").trim();
+  if (!pick) return "";
+
+  const match = pick.match(/https?:\/\/.+/i);
+  if (match?.[0]) return match[0];
+
+  if (pick.startsWith("/")) return `http://localhost:9000${pick}`;
+  return `http://localhost:9000/storage/${pick.replace(/^storage\//, "")}`;
+}
+
 function getFraudReasonText(application: ApplicationDetails["application"]) {
   if (application.fraud_reason && application.fraud_reason.trim().length > 0) return application.fraud_reason;
   if (application.fraud_score !== null && application.fraud_score !== undefined) {
@@ -91,6 +110,7 @@ export default function ApplicationDetailsPage({ params }: { params: Promise<{ i
 
   const [actionModal, setActionModal] = useState<{ id: string; action: "approve" | "reject"; name: string } | null>(null);
   const [actionLoading, setActionLoading] = useState(false);
+  const [reverifyLoading, setReverifyLoading] = useState(false);
 
   const fetchDetails = async () => {
     setLoading(true);
@@ -130,6 +150,20 @@ export default function ApplicationDetailsPage({ params }: { params: Promise<{ i
       toast.error(msg);
     } finally {
       setActionLoading(false);
+    }
+  };
+
+  const reverifyNid = async () => {
+    setReverifyLoading(true);
+    try {
+      await api.post(`/mfi/applications/${id}/reverify-nid`);
+      toast.success("NID re-verification completed.");
+      await fetchDetails();
+    } catch (err: unknown) {
+      const msg = (err as { response?: { data?: { message?: string } } })?.response?.data?.message ?? "NID re-verification failed.";
+      toast.error(msg);
+    } finally {
+      setReverifyLoading(false);
     }
   };
 
@@ -337,6 +371,42 @@ export default function ApplicationDetailsPage({ params }: { params: Promise<{ i
                     {getFraudReasonText(details.application)}
                   </p>
                 </div>
+                <div className="space-y-2">
+                  <div className="flex items-center justify-between gap-3">
+                    <p className="text-sm text-emerald-700 font-semibold flex items-center gap-1.5"><FileSearch size={14} /> NID OCR & Match Verification</p>
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="outline"
+                      className="rounded-lg"
+                      onClick={reverifyNid}
+                      disabled={reverifyLoading}
+                    >
+                      {reverifyLoading ? <Loader2 size={14} className="mr-2 animate-spin" /> : null}
+                      Reverify NID
+                    </Button>
+                  </div>
+                  <div className="grid sm:grid-cols-2 gap-4 p-4 rounded-xl border bg-muted/20">
+                    <div>
+                      <p className="text-xs text-muted-foreground">Extracted Name</p>
+                      <p className="font-semibold">{details.nid_verification?.extracted_name || "Not detected"}</p>
+                    </div>
+                    <div>
+                      <p className="text-xs text-muted-foreground">Extracted NID Number</p>
+                      <p className="font-semibold">{details.nid_verification?.nid_number || "Not detected"}</p>
+                    </div>
+                    <div>
+                      <p className="text-xs text-muted-foreground">Match With `stored_nids`</p>
+                      <p className={cn("font-semibold", details.nid_verification?.matched_reference ? "text-emerald-700" : "text-rose-700")}>
+                        {details.nid_verification?.matched_reference ? "Matched" : "Not matched"}
+                      </p>
+                    </div>
+                    <div>
+                      <p className="text-xs text-muted-foreground">Similarity Score</p>
+                      <p className="font-semibold">{details.nid_verification?.similarity_score !== null && details.nid_verification?.similarity_score !== undefined ? `${details.nid_verification.similarity_score}%` : "0%"}</p>
+                    </div>
+                  </div>
+                </div>
               </CardContent>
             </Card>
           </div>
@@ -357,6 +427,9 @@ export default function ApplicationDetailsPage({ params }: { params: Promise<{ i
                 ) : (
                   <div className="grid gap-6">
                     {details.documents.map((doc, i) => (
+                      (() => {
+                        const resolvedUrl = normalizeDocumentUrl(doc.url, doc.file_path);
+                        return (
                       <div key={i} className="space-y-3 group">
                         <div className="flex items-center justify-between">
                           <div className="flex items-center gap-2">
@@ -366,7 +439,7 @@ export default function ApplicationDetailsPage({ params }: { params: Promise<{ i
                             <p className="font-bold text-xs uppercase tracking-widest text-muted-foreground">{doc.type}</p>
                           </div>
                           <a 
-                            href={doc.url} 
+                            href={resolvedUrl} 
                             target="_blank" 
                             rel="noopener noreferrer"
                             className="w-8 h-8 rounded-full bg-muted flex items-center justify-center text-muted-foreground hover:bg-primary hover:text-primary-foreground transition-all duration-300 shadow-sm"
@@ -379,13 +452,15 @@ export default function ApplicationDetailsPage({ params }: { params: Promise<{ i
                         <div className="relative aspect-[3/4] sm:aspect-video md:aspect-[4/3] lg:aspect-square rounded-2xl overflow-hidden border border-border bg-muted/30 shadow-inner group-hover:border-primary/30 transition-all duration-500">
                           {/* eslint-disable-next-line @next/next/no-img-element */}
                           <img 
-                            src={doc.url} 
+                            src={resolvedUrl} 
                             alt={doc.type} 
                             className="w-full h-full object-cover transition-transform duration-700 group-hover:scale-110"
                           />
                           <div className="absolute inset-0 bg-gradient-to-t from-black/20 to-transparent opacity-0 group-hover:opacity-100 transition-opacity duration-500" />
                         </div>
                       </div>
+                        );
+                      })()
                     ))}
                   </div>
                 )}

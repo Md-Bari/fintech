@@ -14,9 +14,176 @@ use Illuminate\Support\Facades\Mail;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
 use Cloudinary\Cloudinary;
+use Illuminate\Http\UploadedFile;
 
 class LoanApplicationController extends Controller
 {
+    private function toInternalServiceUrl(string $url): string
+    {
+        $parts = parse_url($url);
+        if (!$parts || empty($parts['host'])) {
+            return $url;
+        }
+
+        $host = strtolower((string) $parts['host']);
+        $port = isset($parts['port']) ? (int) $parts['port'] : null;
+
+        if (in_array($host, ['localhost', '127.0.0.1'], true)) {
+            if ($port === 8000) {
+                $url = preg_replace('/\/\/(localhost|127\.0\.0\.1):8000/i', '//loan-fraud-api:8000', $url) ?? $url;
+            } elseif ($port === 9000) {
+                $url = preg_replace('/\/\/(localhost|127\.0\.0\.1):9000/i', '//api:9000', $url) ?? $url;
+            }
+        }
+
+        return $url;
+    }
+
+    private function saveNidVerification(string $applicationId, string $customerUniqueId, array $nidVerification): void
+    {
+        $detailsPayload = [
+            'uploaded_image_url' => $nidVerification['uploaded_image_url'] ?? null,
+            'reference_image_url' => $nidVerification['reference_image_url'] ?? null,
+            'raw_text' => $nidVerification['raw_text'] ?? null,
+            'message' => $nidVerification['message'] ?? null,
+            'reference_found' => $nidVerification['reference_found'] ?? null,
+        ];
+
+        DB::table('nid_verifications')->updateOrInsert(
+            ['loan_application_id' => $applicationId],
+            [
+                'id' => (string) Str::uuid(),
+                'customer_unique_id' => $customerUniqueId,
+                'verification_status' => (string) ($nidVerification['verification_status'] ?? 'not_verified'),
+                'matched_reference' => (bool) ($nidVerification['matched_reference'] ?? false),
+                'similarity_score' => isset($nidVerification['similarity_score']) ? (float) $nidVerification['similarity_score'] : null,
+                'nid_number' => $nidVerification['nid_number'] ?? null,
+                'extracted_name' => $nidVerification['extracted_name'] ?? null,
+                'ocr_confidence' => isset($nidVerification['ocr_confidence']) ? (float) $nidVerification['ocr_confidence'] : null,
+                'ocr_text' => $nidVerification['raw_text'] ?? null,
+                'details' => json_encode($detailsPayload),
+                'updated_at' => now(),
+                'created_at' => now(),
+            ]
+        );
+    }
+
+    private function reverifyNidFromDocumentUrl(string $applicationId, string $customerUniqueId, string $nidUrl): ?array
+    {
+        try {
+            $downloadUrl = $this->toInternalServiceUrl($nidUrl);
+            $download = Http::timeout(12)->get($downloadUrl);
+            if (!$download->ok()) {
+                \Log::warning('NID reverify download failed', ['url' => $downloadUrl, 'status' => $download->status()]);
+                return null;
+            }
+
+            $bytes = $download->body();
+            if (!$bytes) {
+                return null;
+            }
+
+            $name = basename(parse_url($nidUrl, PHP_URL_PATH) ?? 'nid.jpg');
+            if ($name === '' || $name === '/' || $name === '\\') {
+                $name = 'nid.jpg';
+            }
+
+            $url = env('FRAUD_API_NID_VERIFY_URL', 'http://loan-fraud-api:8000/nid/verify-upload');
+            $response = Http::timeout(30)
+                ->attach('file', $bytes, $name)
+                ->post($url, ['customer_unique_id' => $customerUniqueId]);
+
+            if (!$response->ok()) {
+                \Log::warning('NID reverify OCR call failed', ['url' => $url, 'status' => $response->status(), 'body' => $response->body()]);
+                return null;
+            }
+
+            $payload = $response->json() ?? [];
+            $result = [
+                'verification_status' => ((bool) ($payload['matched'] ?? false)) ? 'matched' : 'not_matched',
+                'matched_reference' => (bool) ($payload['matched'] ?? false),
+                'similarity_score' => isset($payload['similarity_score']) ? (float) $payload['similarity_score'] : null,
+                'nid_number' => $payload['nid_number'] ?? null,
+                'extracted_name' => $payload['extracted_name'] ?? null,
+                'ocr_confidence' => isset($payload['ocr_confidence']) ? (float) $payload['ocr_confidence'] : null,
+                'uploaded_image_url' => $payload['uploaded_image_url'] ?? null,
+                'reference_image_url' => $payload['reference_image_url'] ?? null,
+                'raw_text' => $payload['raw_text'] ?? null,
+            ];
+
+            $this->saveNidVerification($applicationId, $customerUniqueId, $result);
+            return $result;
+        } catch (\Throwable $e) {
+            \Log::warning('NID reverify exception', ['message' => $e->getMessage()]);
+            return null;
+        }
+    }
+
+    private function toPublicDocumentUrl(string $filePath): string
+    {
+        $raw = trim($filePath);
+        if ($raw === '') {
+            return '';
+        }
+        $raw = str_replace('\\', '/', $raw);
+        if (preg_match('/https?:\/\/.+/i', $raw, $m)) {
+            return $m[0];
+        }
+        if (str_starts_with($raw, 'http://') || str_starts_with($raw, 'https://')) {
+            return $raw;
+        }
+        $base = rtrim((string) env('APP_URL', 'http://localhost:9000'), '/');
+        $normalized = ltrim($raw, '/');
+        if (str_starts_with($normalized, 'storage/')) {
+            return $base . '/' . $normalized;
+        }
+        return $base . '/storage/' . $normalized;
+    }
+
+    private function verifyNidDocumentWithOcr(UploadedFile $nidFile, string $customerUniqueId): array
+    {
+        $url = env('FRAUD_API_NID_VERIFY_URL', 'http://loan-fraud-api:8000/nid/verify-upload');
+        try {
+            $response = Http::timeout(25)
+                ->attach(
+                    'file',
+                    file_get_contents($nidFile->getRealPath()),
+                    $nidFile->getClientOriginalName()
+                )
+                ->post($url, ['customer_unique_id' => $customerUniqueId]);
+
+            if (!$response->ok()) {
+                return [
+                    'success' => false,
+                    'verification_status' => 'unavailable',
+                    'message' => 'OCR service unavailable',
+                ];
+            }
+
+            $payload = $response->json() ?? [];
+            $matched = (bool) ($payload['matched'] ?? false);
+            return [
+                'success' => (bool) ($payload['success'] ?? true),
+                'verification_status' => $matched ? 'matched' : 'not_matched',
+                'matched_reference' => $matched,
+                'similarity_score' => isset($payload['similarity_score']) ? (float) $payload['similarity_score'] : null,
+                'nid_number' => $payload['nid_number'] ?? null,
+                'extracted_name' => $payload['extracted_name'] ?? null,
+                'ocr_confidence' => isset($payload['ocr_confidence']) ? (float) $payload['ocr_confidence'] : null,
+                'uploaded_image_url' => $payload['uploaded_image_url'] ?? null,
+                'reference_image_url' => $payload['reference_image_url'] ?? null,
+                'raw_text' => $payload['raw_text'] ?? null,
+                'message' => $payload['message'] ?? null,
+            ];
+        } catch (\Throwable $e) {
+            return [
+                'success' => false,
+                'verification_status' => 'unavailable',
+                'message' => 'OCR request failed',
+            ];
+        }
+    }
+
     private function fetchGeminiReview(array $payload, float $fraudRate): ?string
     {
         if ($fraudRate < 40.0) {
@@ -224,9 +391,9 @@ class LoanApplicationController extends Controller
             'education' => 'nullable|string',
             'property_area' => 'nullable|string',
             'dependents' => 'nullable|integer|min:0|max:20',
-            'nid' => 'required|file|mimes:jpg,jpeg,png,pdf|max:2048',
-            'tax' => 'nullable|file|mimes:jpg,jpeg,png,pdf|max:2048',
-            'tin' => 'nullable|file|mimes:jpg,jpeg,png,pdf|max:2048',
+            'nid' => 'required|file|mimes:jpg,jpeg,png,webp|max:4096',
+            'tax' => 'nullable|file|mimes:jpg,jpeg,png,webp,pdf|max:4096',
+            'tin' => 'nullable|file|mimes:jpg,jpeg,png,webp,pdf|max:4096',
         ]);
 
         $user = $request->user();
@@ -278,6 +445,8 @@ class LoanApplicationController extends Controller
         }
 
         $applicationId = Str::uuid();
+        $customerUniqueId = (string) $user->id;
+        $nidVerification = $this->verifyNidDocumentWithOcr($request->file('nid'), $customerUniqueId);
         $prediction = $this->predictFraudScore([
             'loan_amount' => (float) $request->amount,
             'loan_term' => (int) $request->duration_months,
@@ -343,10 +512,14 @@ class LoanApplicationController extends Controller
                 );
             }
 
+            $this->saveNidVerification((string) $applicationId, $customerUniqueId, $nidVerification);
+
             // NID (required)
 
 
-            $nidUrl = $this->storeApplicationDocument($request, 'nid');
+            $nidUrl = is_string($nidVerification['uploaded_image_url'] ?? null) && $nidVerification['uploaded_image_url'] !== ''
+                ? $nidVerification['uploaded_image_url']
+                : $this->storeApplicationDocument($request, 'nid');
 
             DB::table('application_documents')->insert([
                 'id' => Str::uuid(),
@@ -413,7 +586,16 @@ class LoanApplicationController extends Controller
                 'success' => true,
                 'message' => 'Loan application submitted',
                 'data' => [
-                    'application_id' => $applicationId
+                    'application_id' => $applicationId,
+                    'nid_verification' => [
+                        'verification_status' => $nidVerification['verification_status'] ?? 'not_verified',
+                        'matched_reference' => (bool) ($nidVerification['matched_reference'] ?? false),
+                        'similarity_score' => $nidVerification['similarity_score'] ?? null,
+                        'nid_number' => $nidVerification['nid_number'] ?? null,
+                        'extracted_name' => $nidVerification['extracted_name'] ?? null,
+                        'ocr_confidence' => $nidVerification['ocr_confidence'] ?? null,
+                        'uploaded_image_url' => $nidVerification['uploaded_image_url'] ?? null,
+                    ],
                 ]
             ], 201);
         } catch (\Exception $e) {
@@ -531,6 +713,7 @@ class LoanApplicationController extends Controller
 
             $application = $query->select(
                 'loan_applications.id',
+                'loan_applications.user_id',
                 'users.name as applicant_name',
                 'users.email',
                 'loan_products.name as product_name',
@@ -558,6 +741,9 @@ class LoanApplicationController extends Controller
             $documentsRaw = DB::table('application_documents')
                 ->where('loan_application_id', $id)
                 ->get();
+            $nidVerification = DB::table('nid_verifications')
+                ->where('loan_application_id', $id)
+                ->first();
 
             $documents = [];
 
@@ -565,9 +751,18 @@ class LoanApplicationController extends Controller
                 $documents[] = [
                     'type' => $doc->type,
                     'file_path' => $doc->file_path,
-                    // 'url' => url('storage/' . $doc->file_path),
-                    'url' => $doc->file_path,
+                    'url' => $this->toPublicDocumentUrl((string) $doc->file_path),
                 ];
+            }
+
+            if (!$nidVerification) {
+                $nidDocument = collect($documents)->firstWhere('type', 'nid');
+                if ($nidDocument && !empty($nidDocument['url'])) {
+                    $this->reverifyNidFromDocumentUrl((string) $id, (string) $application->user_id, (string) $nidDocument['url']);
+                    $nidVerification = DB::table('nid_verifications')
+                        ->where('loan_application_id', $id)
+                        ->first();
+                }
             }
 
             return response()->json([
@@ -575,7 +770,17 @@ class LoanApplicationController extends Controller
                 'message' => 'Application details fetched',
                 'data' => [
                     'application' => $application,
-                    'documents' => $documents
+                    'documents' => $documents,
+                    'nid_verification' => $nidVerification ? [
+                        'verification_status' => $nidVerification->verification_status,
+                        'matched_reference' => (bool) $nidVerification->matched_reference,
+                        'similarity_score' => $nidVerification->similarity_score !== null ? (float) $nidVerification->similarity_score : null,
+                        'nid_number' => $nidVerification->nid_number,
+                        'extracted_name' => $nidVerification->extracted_name,
+                        'ocr_confidence' => $nidVerification->ocr_confidence !== null ? (float) $nidVerification->ocr_confidence : null,
+                        'uploaded_image_url' => (json_decode($nidVerification->details ?? '{}', true)['uploaded_image_url'] ?? null),
+                        'reference_image_url' => (json_decode($nidVerification->details ?? '{}', true)['reference_image_url'] ?? null),
+                    ] : null,
                 ]
             ]);
         } catch (\Exception $e) {
@@ -586,6 +791,69 @@ class LoanApplicationController extends Controller
                 'error' => $e->getMessage()
             ], 500);
         }
+    }
+
+    public function reverifyNid(Request $request, $id)
+    {
+        $user = $request->user();
+        if (!$user || $user->role !== 'mfi_admin' || !$user->mfi_id) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Unauthorized',
+            ], 403);
+        }
+
+        $application = DB::table('loan_applications')
+            ->where('id', $id)
+            ->where('mfi_id', $user->mfi_id)
+            ->select('id', 'user_id')
+            ->first();
+
+        if (!$application) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Application not found',
+            ], 404);
+        }
+
+        $nidDocument = DB::table('application_documents')
+            ->where('loan_application_id', $id)
+            ->where('type', 'nid')
+            ->orderByDesc('created_at')
+            ->first();
+
+        if (!$nidDocument || empty($nidDocument->file_path)) {
+            return response()->json([
+                'success' => false,
+                'message' => 'NID document not found',
+            ], 404);
+        }
+
+        $nidUrl = $this->toPublicDocumentUrl((string) $nidDocument->file_path);
+        $result = $this->reverifyNidFromDocumentUrl((string) $application->id, (string) $application->user_id, $nidUrl);
+        if (!$result) {
+            return response()->json([
+                'success' => false,
+                'message' => 'NID re-verification failed',
+            ], 500);
+        }
+
+        $saved = DB::table('nid_verifications')
+            ->where('loan_application_id', $id)
+            ->first();
+
+        return response()->json([
+            'success' => true,
+            'message' => 'NID re-verified successfully',
+            'data' => $saved ? [
+                'verification_status' => $saved->verification_status,
+                'matched_reference' => (bool) $saved->matched_reference,
+                'similarity_score' => $saved->similarity_score !== null ? (float) $saved->similarity_score : null,
+                'nid_number' => $saved->nid_number,
+                'extracted_name' => $saved->extracted_name,
+                'ocr_confidence' => $saved->ocr_confidence !== null ? (float) $saved->ocr_confidence : null,
+            ] : $result,
+        ]);
     }
 
 

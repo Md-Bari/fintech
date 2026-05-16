@@ -24,3 +24,9 @@ class ExplainRequest(BaseModel):
     purpose: Optional[str] = None
     description: Optional[str] = None
     product_name: Optional[str] = None
+
+
+class FinanceChatRequest(BaseModel):
+    message: str
+    packages: list[dict] = []
+    history: list[dict] = []

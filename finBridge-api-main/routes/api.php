@@ -2,6 +2,7 @@
 
 use App\Http\Controllers\Api\AdminController;
 use App\Http\Controllers\Api\AuthController;
+use App\Http\Controllers\Api\FinancialAssistantController;
 use App\Http\Controllers\Api\LoanApplicationController;
 use App\Http\Controllers\Api\LoanProductController;
 use App\Http\Controllers\Api\MfiController;
@@ -21,6 +22,7 @@ Route::prefix('v1')->group(function () {
 
     Route::get('/loan-products', [LoanProductController::class, 'index']);
     Route::get('/platform/stats', [AdminController::class, 'publicPlatformStats']);
+    Route::post('/chat/financial-assistant', [FinancialAssistantController::class, 'ask']);
 
     // subscription
     Route::get('/subscription-plans', [SubscriptionController::class, 'plans']);
@@ -80,6 +82,7 @@ Route::prefix('v1')->group(function () {
 
         Route::get('/mfi/applications', [LoanApplicationController::class, 'mfiApplications']);
         Route::get('/mfi/applications/{id}', [LoanApplicationController::class, 'show']);
+        Route::post('/mfi/applications/{id}/reverify-nid', [LoanApplicationController::class, 'reverifyNid']);
         Route::post('/mfi/applications/{id}/approve', [LoanApplicationController::class, 'approve']);
         Route::post('/mfi/applications/{id}/reject', [LoanApplicationController::class, 'reject']);
     });
