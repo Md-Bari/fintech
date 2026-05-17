@@ -33,6 +33,7 @@ api.interceptors.response.use(
       if (typeof window !== "undefined") {
         localStorage.removeItem("auth-token");
         localStorage.removeItem("auth-storage"); // Zustand persist key
+        localStorage.removeItem("mfi-applications-cache");
         window.location.href = "/login";
       }
     }

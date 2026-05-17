@@ -25,6 +25,8 @@ import { cn } from "@/lib/utils";
 import { toast } from "sonner";
 import { motion, AnimatePresence } from "framer-motion";
 
+const MFI_APPLICATION_CACHE_KEY = "mfi-applications-cache";
+
 interface Application {
   id: string;
   applicant_name: string;
@@ -47,6 +49,14 @@ interface ApplicationStats {
 }
 
 type Tab = "all" | "pending" | "approved" | "rejected";
+
+type CachedQueryData = {
+  applications: Application[];
+  stats: ApplicationStats;
+  updatedAt: number;
+};
+
+type MfiApplicationsCache = Record<string, CachedQueryData>;
 
 const STATUS_CONFIG = {
   pending: {
@@ -107,6 +117,27 @@ function getFraudReasonText(app: Application) {
   return "Fraud analysis is not available for this application yet.";
 }
 
+function readCache(): MfiApplicationsCache {
+  if (typeof window === "undefined") return {};
+  try {
+    const raw = localStorage.getItem(MFI_APPLICATION_CACHE_KEY);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw) as MfiApplicationsCache;
+    return parsed && typeof parsed === "object" ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function writeCache(cache: MfiApplicationsCache) {
+  if (typeof window === "undefined") return;
+  localStorage.setItem(MFI_APPLICATION_CACHE_KEY, JSON.stringify(cache));
+}
+
+function buildQueryKey(activeTab: Tab, debouncedSearch: string) {
+  return `${activeTab}::${debouncedSearch.trim().toLowerCase()}`;
+}
+
 export default function MFIApplicationsPage() {
   const [applications, setApplications] = useState<Application[]>([]);
   const [stats, setStats] = useState<ApplicationStats>({
@@ -135,7 +166,19 @@ export default function MFIApplicationsPage() {
   }, [searchTerm]);
 
   const fetchApplications = useCallback(async () => {
-    setLoading(true);
+    const queryKey = buildQueryKey(activeTab, debouncedSearch);
+    const cache = readCache();
+    const cachedData = cache[queryKey];
+
+    if (cachedData) {
+      setApplications(cachedData.applications);
+      setStats(cachedData.stats);
+      setError(null);
+      setLoading(false);
+    } else {
+      setLoading(true);
+    }
+
     try {
       const params = new URLSearchParams();
       params.append("limit", "10");
@@ -144,15 +187,22 @@ export default function MFIApplicationsPage() {
         params.append("search", debouncedSearch.trim());
 
       const res = await api.get(`/mfi/applications?${params.toString()}`);
-      setApplications(res.data?.data ?? []);
-      setStats(
+      const nextApplications = res.data?.data ?? [];
+      const nextStats =
         res.data?.meta?.stats ?? {
           total: 0,
           pending: 0,
           approved: 0,
           rejected: 0,
-        },
-      );
+        };
+      setApplications(nextApplications);
+      setStats(nextStats);
+      cache[queryKey] = {
+        applications: nextApplications,
+        stats: nextStats,
+        updatedAt: Date.now(),
+      };
+      writeCache(cache);
       setError(null);
     } catch (err: unknown) {
       const msg =
@@ -431,7 +481,7 @@ export default function MFIApplicationsPage() {
                 Loading applications…
               </p>
             </div>
-          ) : error ? (
+          ) : error && applications.length === 0 ? (
             <div className="flex flex-col items-center justify-center py-20 gap-3 text-center">
               <div className="w-16 h-16 rounded-full bg-destructive/10 flex items-center justify-center">
                 <XCircle size={28} className="text-destructive" />
