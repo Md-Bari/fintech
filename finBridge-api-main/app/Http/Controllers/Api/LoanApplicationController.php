@@ -89,8 +89,17 @@ class LoanApplicationController extends Controller
             }
 
             $url = env('FRAUD_API_NID_VERIFY_URL', 'http://loan-fraud-api:8000/nid/verify-upload');
+            $mime = 'image/jpeg';
+            if (function_exists('finfo_buffer')) {
+                $finfo = new \finfo(FILEINFO_MIME_TYPE);
+                $detected = $finfo->buffer($bytes);
+                if (is_string($detected) && str_starts_with($detected, 'image/')) {
+                    $mime = $detected;
+                }
+            }
+
             $response = Http::timeout(30)
-                ->attach('file', $bytes, $name)
+                ->attach('file', $bytes, $name, ['Content-Type' => $mime])
                 ->post($url, ['customer_unique_id' => $customerUniqueId]);
 
             if (!$response->ok()) {
@@ -144,11 +153,13 @@ class LoanApplicationController extends Controller
     {
         $url = env('FRAUD_API_NID_VERIFY_URL', 'http://loan-fraud-api:8000/nid/verify-upload');
         try {
+            $mime = $nidFile->getMimeType() ?: 'image/jpeg';
             $response = Http::timeout(25)
                 ->attach(
                     'file',
                     file_get_contents($nidFile->getRealPath()),
-                    $nidFile->getClientOriginalName()
+                    $nidFile->getClientOriginalName(),
+                    ['Content-Type' => $mime]
                 )
                 ->post($url, ['customer_unique_id' => $customerUniqueId]);
 

@@ -14,6 +14,7 @@ from urllib import request as urlrequest
 from PIL import Image, ImageOps
 import pytesseract
 import imagehash
+from PIL import ImageFilter
 from schemas import LoanApplication, ExplainRequest, FinanceChatRequest
 
 app = FastAPI(title="Loan Fraud Detection API")
@@ -87,15 +88,63 @@ def _normalize_nid(value: str | None) -> str:
 
 
 def _extract_nid_number(text: str) -> str:
-    normalized = _normalize_nid(text or "")
-    labeled = re.search(r"(?:ID|NID)\s*(?:NO|NUMBER)?\s*[:\-]?\s*([0-9][0-9\s]{8,20})", (text or ""), flags=re.IGNORECASE)
+    raw_text = text or ""
+    normalized_text = raw_text.translate(str.maketrans("০১২৩৪৫৬৭৮৯", "0123456789"))
+    # 1) Strong preference: NID-labeled region
+    labeled = re.search(
+        r"(?:NID|ID)\s*(?:NO|NUMBER|NUM)?\s*[:\-]?\s*([0-9OIlSBG\s]{8,24})",
+        normalized_text,
+        flags=re.IGNORECASE,
+    )
     if labeled:
-        digits = _normalize_nid(labeled.group(1))
-        if len(digits) >= 10:
+        candidate = labeled.group(1)
+        # common OCR confusions for digit fields
+        candidate = (
+            candidate.replace("O", "0")
+            .replace("o", "0")
+            .replace("I", "1")
+            .replace("l", "1")
+            .replace("S", "5")
+            .replace("B", "8")
+            .replace("G", "6")
+        )
+        digits = _normalize_nid(candidate)
+        if len(digits) in (10, 13, 16, 17):
             return digits
 
-    compact = re.sub(r"\s+", "", normalized or "")
-    for pattern in (r"\d{17}", r"\d{16}", r"\d{13}", r"\d{10}"):
+    # 2) Score all long digit groups by context proximity to NID keywords
+    candidates: list[tuple[int, str]] = []
+    for m in re.finditer(r"[0-9][0-9\s]{8,24}", normalized_text):
+        raw_candidate = m.group(0)
+        digits = _normalize_nid(raw_candidate)
+        if len(digits) not in (10, 13, 16, 17):
+            continue
+
+        start = max(0, m.start() - 25)
+        end = min(len(normalized_text), m.end() + 25)
+        ctx = normalized_text[start:end].lower()
+        score = 0
+        if "nid" in ctx or "id no" in ctx or "national id" in ctx:
+            score += 20
+        # prefer common Bangladesh formats
+        if len(digits) == 10:
+            score += 6
+        elif len(digits) == 13:
+            score += 5
+        elif len(digits) == 17:
+            score += 4
+        else:
+            score += 3
+        # right-most values on card are often NID
+        score += int((m.start() / max(1, len(normalized_text))) * 5)
+        candidates.append((score, digits))
+
+    if candidates:
+        candidates.sort(key=lambda x: x[0], reverse=True)
+        return candidates[0][1]
+
+    compact = re.sub(r"\s+", "", _normalize_nid(normalized_text) or "")
+    for pattern in (r"\d{10}", r"\d{13}", r"\d{17}", r"\d{16}"):
         m = re.search(pattern, compact)
         if m:
             return m.group(0)
@@ -121,8 +170,45 @@ def _extract_name(text: str) -> str:
 
 def _ocr_text(image_path: Path) -> str:
     with Image.open(image_path) as img:
-        gray = ImageOps.grayscale(img)
-        return pytesseract.image_to_string(gray, lang="eng").strip()
+        # Multiple preprocess variants for blur, low contrast, compression artifacts.
+        variants = []
+        gray = ImageOps.grayscale(img).convert("L")
+        up2 = gray.resize((gray.width * 2, gray.height * 2), Image.Resampling.LANCZOS)
+        sharp = up2.filter(ImageFilter.SHARPEN)
+
+        variants.append(up2)
+        variants.append(ImageOps.autocontrast(up2))
+        variants.append(ImageOps.equalize(up2))
+        variants.append(ImageOps.invert(up2))
+        variants.append(ImageOps.autocontrast(sharp))
+
+        # Fixed threshold variants
+        variants.append(up2.point(lambda p: 255 if p > 120 else 0, mode="1").convert("L"))
+        variants.append(up2.point(lambda p: 255 if p > 145 else 0, mode="1").convert("L"))
+
+        best_text = ""
+        best_score = -1
+        configs = [
+            "--oem 3 --psm 6",
+            "--oem 3 --psm 11",
+            "--oem 3 --psm 4",
+        ]
+
+        for variant in variants:
+            for cfg in configs:
+                try:
+                    text = pytesseract.image_to_string(variant, lang="eng", config=cfg).strip()
+                except Exception:
+                    continue
+
+                digits_count = len(_normalize_nid(text))
+                has_nid_word = 1 if re.search(r"\b(?:nid|id\s*no|national)\b", text, flags=re.IGNORECASE) else 0
+                score = (digits_count * 2) + len(text) + (has_nid_word * 15)
+                if score > best_score:
+                    best_score = score
+                    best_text = text
+
+        return best_text
 
 
 def _phash(image_path: Path) -> str:
