@@ -6,6 +6,7 @@ use App\Http\Controllers\Controller;
 use Illuminate\Http\Request;
 use Illuminate\Support\Str;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Http;
 
 class SubscriptionController extends Controller
 {
@@ -188,7 +189,7 @@ class SubscriptionController extends Controller
             // 2. create transaction
             $transactionId = (string) Str::uuid();
 
-            $paymentMode = env('PAYMENT_MODE', 'demo');
+            $paymentMode = env('PAYMENT_MODE', 'sslcommerz');
 
             DB::table('transactions')->insert([
                 'id' => $transactionId,

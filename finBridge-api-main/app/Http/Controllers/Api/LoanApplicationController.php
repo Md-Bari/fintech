@@ -60,7 +60,7 @@ class LoanApplicationController extends Controller
                 'nid_number' => $nidVerification['nid_number'] ?? null,
                 'extracted_name' => $nidVerification['extracted_name'] ?? null,
                 'ocr_confidence' => isset($nidVerification['ocr_confidence']) ? (float) $nidVerification['ocr_confidence'] : null,
-                'ocr_text' => $nidVerification['raw_text'] ?? null,
+                'raw_text' => $nidVerification['raw_text'] ?? null,
                 'details' => json_encode($detailsPayload),
                 'updated_at' => now(),
                 'created_at' => now(),
@@ -455,7 +455,7 @@ class LoanApplicationController extends Controller
             ], 400);
         }
 
-        $applicationId = Str::uuid();
+        $applicationId = (string) Str::uuid();
         $customerUniqueId = (string) $user->id;
         $nidVerification = $this->verifyNidDocumentWithOcr($request->file('nid'), $customerUniqueId);
         $prediction = $this->predictFraudScore([
@@ -502,7 +502,7 @@ class LoanApplicationController extends Controller
                 'description' => $request->description ?? null,
                 'status' => 'pending',
                 'is_fraud' => $isFraud,
-                'fraud_score' => $fraudScore,
+                'fraud_score' => $fraudScore ?? 0,
                 'fraud_reason' => $fraudReason,
                 'created_at' => now(),
                 'updated_at' => now(),
@@ -533,7 +533,7 @@ class LoanApplicationController extends Controller
                 : $this->storeApplicationDocument($request, 'nid');
 
             DB::table('application_documents')->insert([
-                'id' => Str::uuid(),
+                'id' => (string) Str::uuid(),
                 'loan_application_id' => $applicationId,
                 'type' => 'nid',
                 'file_path' => $nidUrl,
@@ -546,7 +546,7 @@ class LoanApplicationController extends Controller
                 $path = $this->storeApplicationDocument($request, 'tax');
 
                 DB::table('application_documents')->insert([
-                    'id' => Str::uuid(),
+                    'id' => (string) Str::uuid(),
                     'loan_application_id' => $applicationId,
                     'type' => 'tax',
                     'file_path' => $path,
@@ -560,7 +560,7 @@ class LoanApplicationController extends Controller
                 $path = $this->storeApplicationDocument($request, 'tin');
 
                 DB::table('application_documents')->insert([
-                    'id' => Str::uuid(),
+                    'id' => (string) Str::uuid(),
                     'loan_application_id' => $applicationId,
                     'type' => 'tin',
                     'file_path' => $path,
@@ -612,6 +612,10 @@ class LoanApplicationController extends Controller
         } catch (\Exception $e) {
 
             DB::rollBack();
+
+            \Log::error('Loan application failed', [
+                'error' => $e->getMessage(),
+            ]);
 
             return response()->json([
                 'success' => false,

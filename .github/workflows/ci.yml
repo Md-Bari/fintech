@@ -1,0 +1,98 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+      - master
+  pull_request:
+
+jobs:
+  loan-fraud-api:
+    name: Loan Fraud API
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: loan-fraud-api
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: loan-fraud-api/requirements.txt
+
+      - name: Install system packages
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends tesseract-ocr
+
+      - name: Install Python dependencies
+        run: python -m pip install --upgrade pip && pip install -r requirements.txt
+
+      - name: Compile Python files
+        run: python -m py_compile main.py schemas.py
+
+      - name: Import FastAPI app
+        run: python -c "from main import app; print(app.title)"
+
+  laravel-api:
+    name: Laravel API
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: finBridge-api-main
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: "8.4"
+          extensions: bcmath, ctype, curl, dom, fileinfo, filter, mbstring, openssl, pdo, pdo_sqlite, tokenizer, xml
+          coverage: none
+
+      - name: Install Composer dependencies
+        run: composer install --no-interaction --prefer-dist --no-progress
+
+      - name: Run Laravel tests
+        env:
+          APP_ENV: testing
+          APP_KEY: base64:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=
+          APP_DEBUG: true
+          DB_CONNECTION: sqlite
+          DB_DATABASE: ":memory:"
+          CACHE_STORE: array
+          SESSION_DRIVER: array
+          QUEUE_CONNECTION: sync
+          MAIL_MAILER: array
+          PAYMENT_MODE: sslcommerz
+        run: php artisan test
+
+  next-client:
+    name: Next Client
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: finBridge-client-main
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: finBridge-client-main/package-lock.json
+
+      - name: Install Node dependencies
+        run: npm ci
+
+      - name: Lint client
+        run: npm run lint
+
+      - name: Build client
+        run: npm run build
