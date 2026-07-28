@@ -29,8 +29,8 @@ class LoanApplicationController extends Controller
         $port = isset($parts['port']) ? (int) $parts['port'] : null;
 
         if (in_array($host, ['localhost', '127.0.0.1'], true)) {
-            if ($port === 8000) {
-                $url = preg_replace('/\/\/(localhost|127\.0\.0\.1):8000/i', '//loan-fraud-api:8000', $url) ?? $url;
+            if ($port === 8000 || $port === 8008) {
+                $url = preg_replace('/\/\/(localhost|127\.0\.0\.1):(8000|8008)/i', '//loan-fraud-api:8000', $url) ?? $url;
             } elseif ($port === 9000) {
                 $url = preg_replace('/\/\/(localhost|127\.0\.0\.1):9000/i', '//api:9000', $url) ?? $url;
             }

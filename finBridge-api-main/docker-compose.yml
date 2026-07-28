@@ -18,7 +18,7 @@ services:
       POSTGRES_USER: finbridge
       POSTGRES_PASSWORD: finbridge
     ports:
-      - "5432:5432"
+      - "5433:5432"
     volumes:
       - pg_data:/var/lib/postgresql/data
     healthcheck:
@@ -36,7 +36,7 @@ services:
       PGADMIN_DEFAULT_EMAIL: admin@finbridge.com
       PGADMIN_DEFAULT_PASSWORD: admin123
     ports:
-      - "5050:80"
+      - "5055:80"
     volumes:
       - pgadmin_data:/var/lib/pgadmin
     restart: unless-stopped

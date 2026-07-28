@@ -86,8 +86,9 @@ function normalizeDocumentUrl(url: string, filePath?: string) {
   const match = pick.match(/https?:\/\/.+/i);
   if (match?.[0]) return match[0];
 
-  if (pick.startsWith("/")) return `http://localhost:9000${pick}`;
-  return `http://localhost:9000/storage/${pick.replace(/^storage\//, "")}`;
+  const baseUrl = (process.env.NEXT_PUBLIC_API_URL ?? "https://literature-unexpected-cheaper-roughly.trycloudflare.com/api/v1").replace(/\/api\/v1\/?$/, "");
+  if (pick.startsWith("/")) return `${baseUrl}${pick}`;
+  return `${baseUrl}/storage/${pick.replace(/^storage\//, "")}`;
 }
 
 function getFraudReasonText(application: ApplicationDetails["application"]) {

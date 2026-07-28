@@ -1,4 +1,4 @@
-﻿"use client";
+"use client";
 
 import React from "react";
 import { motion } from "framer-motion";
@@ -17,7 +17,7 @@ export default function PlatformStats() {
   React.useEffect(() => {
     const loadStats = async () => {
       try {
-        const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:9000/api/v1"}/platform/stats`);
+        const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL ?? "https://literature-unexpected-cheaper-roughly.trycloudflare.com/api/v1"}/platform/stats`);
         const json = await res.json();
         if (json?.success) {
           setStats({

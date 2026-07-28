@@ -8,7 +8,7 @@ services:
       FRAUD_API_PUBLIC_BASE: http://localhost:8000
       GEMINI_API_KEY: ${GEMINI_API_KEY}
     ports:
-      - "8000:8000"
+      - "8020:8000"
     volumes:
       - ./loan-fraud-api/stored_nids:/app/stored_nids
       - ./loan-fraud-api/uploads:/app/uploads
@@ -22,11 +22,11 @@ services:
       POSTGRES_USER: finbridge
       POSTGRES_PASSWORD: finbridge
     ports:
-      - "5432:5432"
+      - "5433:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U finbridge -d finbridge"]
+      test: [ "CMD-SHELL", "pg_isready -U finbridge -d finbridge" ]
       interval: 5s
       timeout: 5s
       retries: 10
@@ -45,7 +45,7 @@ services:
       loan-fraud-api:
         condition: service_started
     ports:
-      - "5050:80"
+      - "5055:80"
     volumes:
       - pgadmin_data:/var/lib/pgadmin
       - ./docker/pgadmin/servers.json:/pgadmin4/servers.json:ro
@@ -69,8 +69,8 @@ services:
       DB_DATABASE: finbridge
       DB_USERNAME: finbridge
       DB_PASSWORD: finbridge
-      FRAUD_API_URL: http://loan-fraud-api:8000/predict
-      FRAUD_API_NID_VERIFY_URL: http://loan-fraud-api:8000/nid/verify-upload
+      FRAUD_API_URL: http://loan-fraud-api:8010/predict
+      FRAUD_API_NID_VERIFY_URL: http://loan-fraud-api:8010/nid/verify-upload
       VIEW_COMPILED_PATH: /var/www/html/storage/framework/views
       CACHE_STORE: file
       QUEUE_CONNECTION: sync
@@ -87,7 +87,7 @@ services:
     container_name: finbridge-client
     restart: unless-stopped
     environment:
-      NEXT_PUBLIC_API_URL: http://localhost:9000/api/v1
+      NEXT_PUBLIC_API_URL: https://literature-unexpected-cheaper-roughly.trycloudflare.com/api/v1
       PORT: 3000
     depends_on:
       - api
