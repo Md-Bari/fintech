@@ -86,7 +86,7 @@ function normalizeDocumentUrl(url: string, filePath?: string) {
   const match = pick.match(/https?:\/\/.+/i);
   if (match?.[0]) return match[0];
 
-  const baseUrl = (process.env.NEXT_PUBLIC_API_URL ?? "https://literature-unexpected-cheaper-roughly.trycloudflare.com/api/v1").replace(/\/api\/v1\/?$/, "");
+  const baseUrl = (process.env.NEXT_PUBLIC_API_URL ?? "https://venue-sitter-catnip.ngrok-free.dev/api/v1").replace(/\/api\/v1\/?$/, "");
   if (pick.startsWith("/")) return `${baseUrl}${pick}`;
   return `${baseUrl}/storage/${pick.replace(/^storage\//, "")}`;
 }

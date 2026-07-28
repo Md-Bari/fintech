@@ -20,7 +20,9 @@ export default function Hero() {
   React.useEffect(() => {
     const loadStats = async () => {
       try {
-        const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL ?? "https://literature-unexpected-cheaper-roughly.trycloudflare.com/api/v1"}/platform/stats`);
+        const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL ?? "https://venue-sitter-catnip.ngrok-free.dev/api/v1"}/platform/stats`, {
+          headers: { "ngrok-skip-browser-warning": "69420" },
+        });
         const json = await res.json();
         if (json?.success) {
           setActiveEntrepreneurs(Number(json.data?.active_entrepreneurs ?? 0));

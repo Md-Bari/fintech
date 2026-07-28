@@ -62,7 +62,7 @@ services:
       APP_KEY: base64:vAfPWzNvc3aIDeNYN8hEIjoEyqKh6rANaSUJvjJWb9U=
       APP_URL: http://localhost:9000
       FRONTEND_URL: http://localhost:3000
-      CORS_ALLOWED_ORIGINS: http://localhost:3000
+      CORS_ALLOWED_ORIGINS: http://localhost:3000,http://localhost:3001,https://fin-bridge-nine.vercel.app,https://fin-bridge-frontend.vercel.app
       DB_CONNECTION: pgsql
       DB_HOST: db
       DB_PORT: 5432
@@ -87,7 +87,7 @@ services:
     container_name: finbridge-client
     restart: unless-stopped
     environment:
-      NEXT_PUBLIC_API_URL: https://literature-unexpected-cheaper-roughly.trycloudflare.com/api/v1
+      NEXT_PUBLIC_API_URL: https://venue-sitter-catnip.ngrok-free.dev/api/v1
       PORT: 3000
     depends_on:
       - api

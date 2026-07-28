@@ -1,12 +1,13 @@
 import axios from "axios";
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "https://literature-unexpected-cheaper-roughly.trycloudflare.com/api/v1";
+const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "https://venue-sitter-catnip.ngrok-free.dev/api/v1";
 
 
 const api = axios.create({
   baseURL: API_URL,
   headers: {
     "Content-Type": "application/json",
+    "ngrok-skip-browser-warning": "69420",
   },
 });
 
