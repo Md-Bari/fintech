@@ -221,8 +221,12 @@ function PlanModal({
   );
 }
 
+interface SubscriptionPlansProps {
+  limit?: number;
+}
+
 // ── Main Section ───────────────────────────────────────────────────────────
-export default function SubscriptionPlans() {
+export default function SubscriptionPlans({ limit }: SubscriptionPlansProps = {}) {
   const { isAuthenticated, user } = useAuthStore();
   const [isMounted, setIsMounted] = useState(false);
   const [plans, setPlans] = useState<Plan[]>([]);
@@ -346,7 +350,7 @@ export default function SubscriptionPlans() {
                   : "md:grid-cols-3 max-w-5xl"
               )}
             >
-              {plans.map((plan, i) => {
+              {(limit ? plans.slice(0, limit) : plans).map((plan, i) => {
                 const meta = getPlanMeta(plan.name);
                 const cta = getCta(plan);
 
@@ -471,6 +475,26 @@ export default function SubscriptionPlans() {
                 );
               })}
             </div>
+          )}
+
+          {/* Show More Button */}
+          {limit && plans.length > limit && (
+            <motion.div
+              initial={{ opacity: 0, y: 20 }}
+              whileInView={{ opacity: 1, y: 0 }}
+              viewport={{ once: true }}
+              transition={{ duration: 0.5 }}
+              className="mt-14 text-center"
+            >
+              <Button
+                size="lg"
+                onClick={() => router.push("/plans")}
+                className="rounded-full px-8 py-6 text-base font-semibold shadow-xl hover:shadow-2xl transition-all gap-3 bg-primary hover:bg-primary/90 text-primary-foreground group"
+              >
+                Show More Packages ({plans.length - limit} More Available)
+                <ArrowRight size={20} className="transition-transform group-hover:translate-x-1" />
+              </Button>
+            </motion.div>
           )}
         </div>
       </section>

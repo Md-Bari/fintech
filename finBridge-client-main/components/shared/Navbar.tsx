@@ -12,7 +12,7 @@ import { cn } from "@/lib/utils";
 const baseNavLinks = [
   { name: "Home", href: "/" },
   { name: "Find Loans", href: "/loans" },
-  { name: "Plans", href: "/#plans" },
+  { name: "Plans", href: "/plans" },
   { name: "How It Works", href: "/how-it-works" },
   { name: "About Us", href: "/about" },
 ];

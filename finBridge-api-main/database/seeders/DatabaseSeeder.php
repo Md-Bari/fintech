@@ -16,6 +16,7 @@ class DatabaseSeeder extends Seeder
     public function run(): void
     {
         $this->call(InitialSeeder::class);
+        $this->call(HundredDemoDataSeeder::class);
 
         if (env('SEED_MFI_ACCOUNTS', false)) {
             $this->call(BulkMfiAccountsSeeder::class);

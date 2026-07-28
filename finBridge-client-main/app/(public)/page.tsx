@@ -22,7 +22,7 @@ export default function HomePage() {
       <PlatformStats />
       <FeaturesGrid />
       <FeaturedLoans />
-      <SubscriptionPlans />
+      <SubscriptionPlans limit={3} />
       <Testimonials />
       <FAQ />
       <FinalCTA />
